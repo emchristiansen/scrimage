@@ -1,0 +1,2083 @@
+/*
+   Copyright 2013-2014 Stephen K Samuel
+
+   Licensed under the Apache License, Version 2.0 (the "License");
+   you may not use this file except in compliance with the License.
+   You may obtain a copy of the License at
+
+       http://www.apache.org/licenses/LICENSE-2.0
+
+   Unless required by applicable law or agreed to in writing, software
+   distributed under the License is distributed on an "AS IS" BASIS,
+   WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+   See the License for the specific language governing permissions and
+   limitations under the License.
+ */
+
+package com.sksamuel.scrimage;
+
+import com.sksamuel.scrimage.angles.Degrees;
+import com.sksamuel.scrimage.angles.Radians;
+import com.sksamuel.scrimage.canvas.Canvas;
+import com.sksamuel.scrimage.canvas.drawables.FilledRect;
+import com.sksamuel.scrimage.canvas.painters.LinearGradient;
+import com.sksamuel.scrimage.canvas.painters.Painter;
+import com.sksamuel.scrimage.color.Colors;
+import com.sksamuel.scrimage.color.Grayscale;
+import com.sksamuel.scrimage.color.GrayscaleMethod;
+import com.sksamuel.scrimage.color.RGBColor;
+import com.sksamuel.scrimage.composite.Composite;
+import com.sksamuel.scrimage.filter.Filter;
+import com.sksamuel.scrimage.metadata.ImageMetadata;
+import com.sksamuel.scrimage.metadata.OrientationTools;
+import com.sksamuel.scrimage.nio.*;
+import com.sksamuel.scrimage.pixels.Pixel;
+import com.sksamuel.scrimage.pixels.PixelTools;
+import com.sksamuel.scrimage.pixels.PixelsExtractor;
+import com.sksamuel.scrimage.transform.Transform;
+import org.apache.commons.io.IOUtils;
+import thirdparty.colorthief.ColorThief;
+import thirdparty.colorthief.MMCQ;
+import thirdparty.mortennobel.*;
+
+import javax.imageio.ImageIO;
+import java.awt.*;
+import java.awt.geom.AffineTransform;
+import java.awt.image.AffineTransformOp;
+import java.awt.image.BufferedImage;
+import java.awt.image.BufferedImageOp;
+import com.sksamuel.scrimage.subpixel.LinearSubpixelInterpolator;
+
+import java.awt.image.DataBuffer;
+import java.awt.image.DataBufferInt;
+import java.awt.image.WritableRaster;
+import java.io.File;
+import java.io.IOException;
+import java.io.InputStream;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.util.Arrays;
+import java.util.List;
+import java.util.function.Function;
+import java.util.stream.Collectors;
+
+/**
+ * An immutable Image backed by an AWT BufferedImage.
+ * <p>
+ * An Image represents an abstraction that allow operations such
+ * as resize, scale, rotate, flip, trim, pad, cover, fit.
+ * <p>
+ * All operations on an ImmutableImage are read only or return a cloned instance of this image.
+ * For operations that can be performed without a copying step, see MutableImage.
+ *
+ * @author Stephen Samuel
+ */
+@SuppressWarnings("unused")
+public class ImmutableImage extends MutableImage {
+
+   private final ImageMetadata metadata;
+
+   static {
+      ImageIO.scanForPlugins();
+   }
+
+   public static final int DEFAULT_DATA_TYPE = BufferedImage.TYPE_INT_ARGB;
+   // use DEFAULT_DATA_TYPE
+   @Deprecated
+   public static final int CANONICAL_DATA_TYPE = DEFAULT_DATA_TYPE;
+   public static final int UNDERLYING_DATA_TYPE = -1;
+
+   public static ImmutableImageLoader loader() {
+      return new ImmutableImageLoader();
+   }
+
+   private ImmutableImage(BufferedImage awt, ImageMetadata metadata) {
+      super(awt);
+      this.metadata = metadata;
+   }
+
+   // ----- Image Builder Methods ------ //
+
+   /**
+    * Create a new [ImmutableImage] from a source AWT Image.
+    * This method will copy the source image so that modifications to the original
+    * do not write forward to this image.
+    *
+    * @param awt the source AWT Image
+    * @return a new ImmutableImage
+    */
+   public static ImmutableImage fromAwt(BufferedImage awt) {
+      return fromAwt(awt, UNDERLYING_DATA_TYPE);
+   }
+
+   /**
+    * Create a new [ImmutableImage] from a source AWT Image.
+    * This method will copy the source image so that modifications to the original
+    * do not write forward to this image.
+    * <p>
+    * If the given type is greater than 0, then a copy will be made using that type for the image.
+    * If the param type is -1, then the source image type will be used, unless the source image
+    * has type 0, in which case BufferedImage.TYPE_INT_ARGB will be used.
+    *
+    * @param awt the source AWT Image
+    * @return a new ImmutableImage
+    */
+   public static ImmutableImage fromAwt(BufferedImage awt, int type) {
+      int imageType = type;
+      if (type == UNDERLYING_DATA_TYPE) {
+         imageType = awt.getType();
+      }
+      if (imageType == 0) {
+         imageType = BufferedImage.TYPE_INT_ARGB;
+      }
+      return wrapAwt(new AwtImage(awt).clone(imageType).awt());
+   }
+
+   /**
+    * Creates a new [ImmutableImage] from an AWT image by wrapping that source image.
+    * Note: Modifications to the source will write forward to this image. In other words,
+    * this method should not be used if the source is going to be shared. This method is
+    * intended for when an AWT image is created as an intermediate step and never exposed.
+    *
+    * @param awt      the source AWT Image
+    * @param metadata the image metadata
+    * @return a new ImmutableImage
+    */
+   public static ImmutableImage wrapAwt(BufferedImage awt, ImageMetadata metadata) {
+      return new ImmutableImage(awt, metadata);
+   }
+
+   /**
+    * Creates a new [ImmutableImage] from an AWT image by wrapping that source image.
+    * Note: Modifications to the source will write forward to this image. In other words,
+    * this method should not be used if the source is going to be shared. This method is
+    * intended for when an AWT image is created as an intermediate step and never exposed.
+    *
+    * @param awt the source AWT Image
+    * @return a new ImmutableImage
+    */
+   public static ImmutableImage wrapAwt(BufferedImage awt) {
+      return wrapAwt(awt, ImageMetadata.empty);
+   }
+
+   /**
+    * Creates a new [ImmutableImage] from an AWT image by wrapping that source image.
+    * Since the source buffer is wrapped, any changes to the original will write through.
+    * If you require a completely independent and truely immutable image, then consider [fromAwt].
+    * <p>
+    * If the given awt image does not have the same type as requested, then this will
+    * force the image to be copied using [fromAwt].
+    *
+    * @param awt  the source AWT Image
+    * @param type the AWT image type to use. If the image is not in this format already it will be coped.
+    *             specify UNDERLYING_DATA_TYPE if you want to use the original
+    * @return a new Scrimage Image
+    */
+   public static ImmutableImage wrapAwt(BufferedImage awt, int type) {
+      if (type == UNDERLYING_DATA_TYPE || awt.getType() == type) return new ImmutableImage(awt, ImageMetadata.empty);
+      else return fromAwt(awt, type);
+   }
+
+   public static ImmutableImage wrapPixels(int w, int h, Pixel[] pixels, ImageMetadata metadata) {
+      return ImmutableImage.create(w, h, pixels).associateMetadata(metadata);
+   }
+
+   /**
+    * Creates a new [ImmutableImage] from a file.
+    * This method will also attach metadata.
+    *
+    * @return a new ImmutableImage loaded from the given file
+    * @deprecated use ImmutableImage.loader().fromFile(file);
+    */
+   @Deprecated
+   public static ImmutableImage fromFile(File file) throws IOException {
+      return fromPath(file.toPath());
+   }
+
+   /**
+    * Creates a new [ImmutableImage] from a path.
+    * This method will also attach metadata.
+    *
+    * @return a new ImmutableImage loaded from the given path
+    * @deprecated use ImmutableImage.loader().fromPath(path);
+    */
+   @Deprecated
+   public static ImmutableImage fromPath(Path path) throws IOException {
+      assert path != null;
+      try (InputStream in = Files.newInputStream(path)) {
+         return fromStream(in);
+      }
+   }
+
+   /**
+    * Create a new ImmutableImage that is the given width and height with no initialization.
+    * This will usually result in a default black background (all pixel data defaulting to zeroes)
+    * but that is not guaranteed.
+    * The type of the image will be [ImmutableImage.DEFAULT_DATA_TYPE].
+    *
+    * @param width  the width of the new image
+    * @param height the height of the new image
+    * @return the new Image with the given width and height
+    */
+   public static ImmutableImage create(int width, int height) {
+      return create(width, height, DEFAULT_DATA_TYPE);
+   }
+
+   /**
+    * Create a new ImmutableImage that is the given width and height and type with no initialization.
+    * This will usually result in a default black background (all pixel data defaulting to zeroes)
+    * but that is not guaranteed.
+    * The underlying image will have the type specified.
+    *
+    * @param width  the width of the new image
+    * @param height the height of the new image
+    * @return the new Image with the given width and height
+    */
+   public static ImmutableImage create(int width, int height, int type) {
+      BufferedImage target = new BufferedImage(width, height, type);
+      return new ImmutableImage(target, ImageMetadata.empty);
+   }
+
+   /**
+    * Create a new ImmutableImage that is the given dimension with no initialization.
+    * This will usually result in a default black background (all pixel data defaulting to zeroes)
+    * but that is not guaranteed.
+    * The type of the image will be [ImmutableImage.DEFAULT_DATA_TYPE].
+    *
+    * @param dimension the size of the new image
+    * @return the new Image with the given dimension
+    */
+   public static ImmutableImage create(Dimension dimension) {
+      return create(dimension.getX(), dimension.getY());
+   }
+
+   /**
+    * Return a new ImmutableImage with the given width and height, with all pixels set to the supplied colour.
+    * The type of the image will be [ImmutableImage.CANONICAL_DATA_TYPE].
+    *
+    * @param width  the width of the new Image
+    * @param height the height of the new Image
+    * @param color  the color to set all pixels to
+    * @return the new Image
+    */
+   public static ImmutableImage filled(int width, int height, Color color) {
+      return filled(width, height, color, ImmutableImage.DEFAULT_DATA_TYPE);
+   }
+
+   /**
+    * Return a new ImmutableImage with the given width and height and type, with all pixels
+    * set to the supplied colour.
+    *
+    * @param width  the width of the new Image
+    * @param height the height of the new Image
+    * @param color  the color to set all pixels to
+    * @return the new Image
+    */
+   public static ImmutableImage filled(int width, int height, Color color, int type) {
+      ImmutableImage target = create(width, height, type);
+      WritableRaster targetRaster = target.awt().getRaster();
+      Object colorElements = target.awt().getColorModel().getDataElements(RGBColor.fromAwt(color).toARGBInt(), null);
+      DataBuffer buffer = targetRaster.getDataBuffer();
+      if (buffer instanceof DataBufferInt
+         && colorElements instanceof int[]
+         && ((int[]) colorElements).length == 1) {
+         Arrays.fill(((DataBufferInt) buffer).getData(), ((int[]) colorElements)[0]);
+         return target;
+      }
+      for (int h = 0; h < height; h++) {
+         for (int w = 0; w < width; w++) {
+            targetRaster.setDataElements(w, h, colorElements);
+         }
+      }
+      return target;
+   }
+
+   /**
+    * Create a new Image from an input stream. This is intended to create
+    * an image from an image format eg PNG, not from a stream of pixels.
+    * This method will also attach metadata if available.
+    *
+    * @param in the stream to read the bytes from
+    * @return a new Image
+    * @deprecated use ImmutableImage.loader().fromFile(file);
+    */
+   @Deprecated
+   public static ImmutableImage fromStream(InputStream in) throws IOException {
+      return fromStream(in, UNDERLYING_DATA_TYPE);
+   }
+
+   /**
+    * Create a new Image from an input stream. This is intended to create
+    * an image from an image format eg PNG, not from a stream of pixels.
+    * This method will also attach metadata if available.
+    * The image will have the given type. If the given type is not the same
+    * as stored in the stream, this will force the image to be copied.
+    * Consider using fromStream(in).
+    *
+    * @param in the stream to read the bytes from
+    * @return a new Image
+    * @deprecated use ImmutableImage.loader().fromFile(file);
+    */
+   @Deprecated
+   public static ImmutableImage fromStream(InputStream in, int type) throws IOException {
+      assert in != null;
+      byte[] bytes = IOUtils.toByteArray(in);
+      assert bytes.length > 0;
+      return parse(bytes, type);
+   }
+
+   /**
+    * Creates a new Image from the resource on the classpath.
+    *
+    * @return a new Image loaded from the classpath resource
+    * @deprecated use ImmutableImage.loader().fromResource(file);
+    */
+   @Deprecated
+   public static ImmutableImage fromResource(String path) throws IOException {
+      return fromResource(path, DEFAULT_DATA_TYPE);
+   }
+
+   /**
+    * @return a new Image loaded from the classpath resource using the given image type
+    * @deprecated use ImmutableImage.loader().fromResource(file);
+    */
+   @Deprecated
+   public static ImmutableImage fromResource(String path, int type) throws IOException {
+      return fromStream(ImmutableImage.class.getResourceAsStream(path), type);
+   }
+
+   /**
+    * Create a new Image from an array of pixels. The specified
+    * width and height must match the number of pixels.
+    * The image's type will be CANONICAL_DATA_TYPE.
+    *
+    * @return a new Image
+    */
+   public static ImmutableImage create(int w, int h, Pixel[] pixels) {
+      return create(w, h, pixels, DEFAULT_DATA_TYPE);
+   }
+
+   /**
+    * Create a new Image from an array of pixels with the given type. The specified
+    * width and height must match the number of pixels.
+    *
+    * @return a new Image
+    */
+   public static ImmutableImage create(int w, int h, Pixel[] pixels, int type) {
+      if (pixels.length != (long) w * h)
+         throw new IllegalArgumentException("pixels array length " + pixels.length + " does not match " + w + "x" + h + " = " + ((long) w * h));
+      ImmutableImage image = ImmutableImage.create(w, h, type);
+      int[] argb = new int[pixels.length];
+      for (int i = 0; i < pixels.length; i++) {
+         argb[i] = pixels[i].toARGBInt();
+      }
+      image.awt().setRGB(0, 0, w, h, argb, 0, w);
+      return image;
+   }
+
+   /**
+    * Create a new Image from an array of bytes. This is intended to create
+    * an image from an image format eg PNG, not from a stream of pixels.
+    *
+    * @param bytes the bytes from the format stream
+    * @return a new Image
+    * @deprecated use ImmutableImage.loader().fromBytes(file);
+    */
+   @Deprecated
+   public static ImmutableImage parse(byte[] bytes) throws IOException {
+      return parse(bytes, -1);
+   }
+
+   /**
+    * Create a new Image from an array of bytes. This is intended to create
+    * an image from an image format eg PNG, not from a stream of pixels.
+    * <p>
+    * The final image will have the given type. Note, if the image is not
+    * stored in the given type, then it will need to be copied. Unless you have
+    * a reason to specify the format, use parse(byte[]) and allow the image readers
+    * to choose the most appropriate type.
+    *
+    * @param bytes the bytes from the format stream
+    * @return a new Image
+    * @deprecated use ImmutableImage.loader().fromBytes(file);
+    */
+   @Deprecated
+   public static ImmutableImage parse(byte[] bytes, int type) throws IOException {
+      ImmutableImage image = ImageReaders.read(new ByteArrayImageSource(bytes), null);
+      ImageMetadata metadata = ImageMetadata.fromBytes(bytes);
+      if (type > 0) {
+         image = image.copy(type);
+      }
+      // detect iphone mode, and rotate
+      return OrientationTools.reorient(image, metadata).associateMetadata(metadata);
+   }
+
+   // ----- End Builder Methods ------ //
+
+   private PixelsExtractor pixelExtractor() {
+      return r -> pixels(r.x, r.y, r.width, r.height);
+   }
+
+   public ImmutableImage autocrop() {
+      return autocrop(Colors.Transparent.awt());
+   }
+
+   public ImmutableImage autocrop(Color color) {
+      return autocrop(color, 0);
+   }
+
+   /**
+    * Crops an image by removing cols and rows that are composed only of a single
+    * given color.
+    * <p>
+    * Eg, if an image had a 20 pixel row of white at the top, and this method was
+    * invoked with Color.WHITE then the image returned would have that 20 pixel row
+    * removed.
+    * <p>
+    * This method is useful when images have an abudance of a single colour around them.
+    *
+    * @param color          the color to match
+    * @param colorTolerance the amount of tolerance to use when determining whether
+    *                       the color matches the reference color [0..255]
+    * @return a new cropped Image with the matching rows and columns removed
+    */
+   public ImmutableImage autocrop(Color color, int colorTolerance) {
+      int x1 = AutocropOps.scanright(color, height, width, 0, pixelExtractor(), colorTolerance);
+      int x2 = AutocropOps.scanleft(color, height, width - 1, pixelExtractor(), colorTolerance);
+      int y1 = AutocropOps.scandown(color, height, width, 0, pixelExtractor(), colorTolerance);
+      int y2 = AutocropOps.scanup(color, width, height - 1, pixelExtractor(), colorTolerance);
+      // If every column matches the crop colour, scanright walks all the way
+      // to width and scanleft all the way to 0 (and likewise for rows). The
+      // "nothing to crop" subimage(x1, y1, x2-x1+1, ...) call would then have
+      // a negative width/height. Treat an all-matching image as "nothing to
+      // keep but also nothing to crop" and return the original.
+      if (x1 == 0 && y1 == 0 && x2 == width - 1 && y2 == height - 1) return this;
+      if (x1 > x2 || y1 > y2) return this;
+      return subimage(x1, y1, x2 - x1 + 1, y2 - y1 + 1);
+   }
+
+   /**
+    * Creates an empty ImmutableImage of the same concrete type as this image and with
+    * the same dimensions.
+    * <p>
+    * The underlying pixels will not be initialized.
+    * <p>
+    * If the source has BufferedImage.TYPE_CUSTOM (type 0) — which can't be
+    * fed into a BufferedImage(width, height, type) constructor — falls back
+    * to DEFAULT_DATA_TYPE, matching fromAwt's policy.
+    *
+    * @return a new Image that is a clone of this image but with uninitialized data
+    */
+   public ImmutableImage blank() {
+      int type = getType();
+      if (type == 0) type = DEFAULT_DATA_TYPE;
+      return create(width, height, type);
+   }
+
+   /**
+    * Convenience method for bound(w, h, ScaleMethod.Bicubic)
+    *
+    * @return a new Image bounded to the given width and height
+    */
+   public ImmutableImage bound(int w, int h) {
+      return bound(w, h, ScaleMethod.Bicubic);
+   }
+
+   /**
+    * Returns an image that is no larger than the given width and height keeping the same aspect ratio.
+    * <p>
+    * If the current image is already within the given dimensions then the same image will be returned.
+    * If not, then a scaled image, with the same aspect ratio as the original, and with dimensions
+    * inside the constraints will be returned.
+    * <p>
+    * This operation differs from max, in that max will scale an image up to be as large as it can be
+    * inside the constraints. Bound will keep the image the same if its already within the constraints.
+    *
+    * @param w the maximum width
+    * @param h the maximum height
+    * @return the constrained image.
+    */
+   public ImmutableImage bound(int w, int h, ScaleMethod scaleMethod) {
+      if (width <= w && height <= h) return this;
+      else return max(w, h, scaleMethod);
+   }
+
+   /**
+    * Returns a new Image with the brightness adjusted.
+    *
+    * @return a new Image with the brightness adjusted by the given factor
+    */
+   public ImmutableImage brightness(double factor) {
+      ImmutableImage target = copy();
+      target.rescaleInPlace(factor);
+      return target;
+   }
+
+   /**
+    * Creates a new image with the same data as this image.
+    * Any operations to the copied image will not write back to the original.
+    *
+    * @return A copy of this image.
+    */
+   public ImmutableImage copy() {
+      // fromAwt(BufferedImage) intentionally uses ImageMetadata.empty
+      // because it doesn't know the source's metadata association — but
+      // copy() does, so re-attach it. Without this, every method that
+      // routes through copy() (map, filter, contrast, brightness,
+      // removeTransparency, composite, overlay, ...) silently strips EXIF.
+      return fromAwt(awt()).associateMetadata(metadata);
+   }
+
+   /**
+    * Returns a copy of this image with the underlying image type set to the given value.
+    * The type value is one of the AWT standard image types, taken from BufferedImage.
+    *
+    * @return a copy of this image using the given underlying image type
+    */
+   public ImmutableImage copy(int type) {
+      return fromAwt(awt(), type).associateMetadata(metadata);
+   }
+
+   /**
+    * Returns a new image where every pixel is the result of applying the given transform
+    * to the corresponding pixel of this image. The transform receives the pixel offset
+    * (row major, offset = y * width + x) and the packed ARGB value, and returns the new
+    * packed ARGB value.
+    * <p>
+    * Because the transform is written to every pixel of the target, there is no need to
+    * copy this image's raster first — the pixels are read from this image, transformed,
+    * and bulk-written into a blank image of the same type, saving a full-image memory
+    * pass compared to copy()-then-mutate-in-place.
+    * <p>
+    * Palette-based images (IndexColorModel) are the exception: a blank palette-based
+    * image gets the default palette rather than this image's palette, so for those the
+    * copy() based path is kept and the ARGB values are read back from the copy, exactly
+    * as the mutate-in-place path did. The same applies to TYPE_CUSTOM (type 0) images,
+    * where copy() converts to TYPE_INT_ARGB via Graphics2D and reading from the source
+    * is not guaranteed to be bit-identical to reading from that conversion.
+    */
+   private ImmutableImage transformPixels(java.util.function.IntBinaryOperator transform) {
+      final ImmutableImage target;
+      final int[] argb;
+      if (getType() == 0 || awt().getColorModel() instanceof java.awt.image.IndexColorModel) {
+         target = copy();
+         argb = target.awt().getRGB(0, 0, width, height, null, 0, width);
+      } else {
+         target = blank().associateMetadata(metadata);
+         argb = awt().getRGB(0, 0, width, height, null, 0, width);
+      }
+      for (int i = 0; i < argb.length; i++) {
+         argb[i] = transform.applyAsInt(i, argb[i]);
+      }
+      target.awt().setRGB(0, 0, width, height, argb, 0, width);
+      return target;
+   }
+
+   /**
+    * Apply the given image with this image using the given composite.
+    * The original image is unchanged.
+    *
+    * @param composite   the composite to use. See com.sksamuel.scrimage.Composite.
+    * @param applicative the image to apply with the composite.
+    * @return A new image with the given image applied using the given composite.
+    */
+   public ImmutableImage composite(Composite composite, ImmutableImage applicative) {
+      ImmutableImage target = copy();
+      composite.apply(target, applicative);
+      return target;
+   }
+
+   public ImageMetadata getMetadata() {
+      return metadata;
+   }
+
+   /**
+    * Returns a new Image with the contrast adjusted.
+    *
+    * @return a new Image with the contrast adjusted by the given factor
+    */
+   public ImmutableImage contrast(double factor) {
+      // Same per-pixel maths as MutableImage.contrastInPlace, but routed through
+      // transformPixels so the redundant full-raster copy is skipped.
+      return transformPixels((offset, p) -> {
+         int r = PixelTools.truncate((factor * (PixelTools.red(p) - 128)) + 128);
+         int g = PixelTools.truncate((factor * (PixelTools.green(p) - 128)) + 128);
+         int b = PixelTools.truncate((factor * (PixelTools.blue(p) - 128)) + 128);
+         return PixelTools.argb(PixelTools.alpha(p), r, g, b);
+      });
+   }
+
+   /**
+    * Convenience method for cover(targetWidth, targetHeight, ScaleMethod.Bicubic, Position.Center)
+    *
+    * @return a new Image scaled to cover the given dimensions
+    */
+   public ImmutableImage cover(int targetWidth,
+                               int targetHeight) {
+      return cover(targetWidth, targetHeight, ScaleMethod.Bicubic, Position.Center, DEFAULT_DATA_TYPE);
+   }
+
+   /**
+    * Convenience method for cover(targetWidth, targetHeight, ScaleMethod.Bicubic, position)
+    *
+    * @return a new Image scaled to cover the given dimensions at the given position
+    */
+   public ImmutableImage cover(int targetWidth,
+                               int targetHeight,
+                               Position position) {
+      return cover(targetWidth, targetHeight, ScaleMethod.Bicubic, position, DEFAULT_DATA_TYPE);
+   }
+
+   /**
+    * Returns an image with the given dimensions where this image has been scaled to
+    * completely cover the new dimensions whilst retaining the original aspect ratio.
+    * <p>
+    * If the given dimensions have a different aspect ratio than this image
+    * then the image will be cropped so that it still covers the new area
+    * without leaving any background.
+    * <p>
+    * In other words, the image "covers" the target dimensions with the potential loss of some of the image if
+    * the aspect ratio change. Similar to taking a 16:9 movie and resizing it for a 4:3 screen. You can either
+    * lose part of the image (this operation) or resize it so there is empty space on two sides (the fit operation).
+    *
+    * @param targetWidth  the target width
+    * @param targetHeight the target height
+    * @param scaleMethod  the type of scaling method to use. Defaults to Bicubic
+    * @param position     where to position the image inside the new canvas
+    * @return a new Image with the original image scaled to cover the new dimensions
+    */
+   public ImmutableImage cover(int targetWidth,
+                               int targetHeight,
+                               ScaleMethod scaleMethod,
+                               Position position) {
+      return cover(targetWidth, targetHeight, scaleMethod, position, DEFAULT_DATA_TYPE);
+   }
+
+   /**
+    * Returns an image with the given dimensions where this image has been scaled to
+    * completely cover the new dimensions whilst retaining the original aspect ratio.
+    * <p>
+    * If the given dimensions have a different aspect ratio than this image
+    * then the image will be cropped so that it still covers the new area
+    * without leaving any background.
+    * <p>
+    * In other words, the image "covers" the target dimensions with the potential loss of some of the image if
+    * the aspect ratio change. Similar to taking a 16:9 movie and resizing it for a 4:3 screen. You can either
+    * lose part of the image (this operation) or resize it so there is empty space on two sides (the fit operation).
+    *
+    * @param targetWidth  the target width
+    * @param targetHeight the target height
+    * @param scaleMethod  the type of scaling method to use. Defaults to Bicubic
+    * @param position     where to position the image inside the new canvas
+    * @param imageType    the AWT image type to create. See BufferedImage.TYPE_*
+    * @return a new Image with the original image scaled to cover the new dimensions
+    */
+   public ImmutableImage cover(int targetWidth,
+                               int targetHeight,
+                               ScaleMethod scaleMethod,
+                               Position position,
+                               int imageType) {
+      Dimension coveredDimensions = DimensionTools.dimensionsToCover(new Dimension(targetWidth, targetHeight), new Dimension(width, height));
+      ImmutableImage scaled = scaleTo(coveredDimensions.getX(), coveredDimensions.getY(), scaleMethod);
+      Dimension dim = position.calculateXY(targetWidth, targetHeight, coveredDimensions.getX(), coveredDimensions.getY());
+      ImmutableImage result = create(targetWidth, targetHeight, imageType);
+      result.overlayInPlace(scaled.awt(), dim.getX(), dim.getY());
+      return result.associateMetadata(metadata);
+   }
+
+   /**
+    * Creates a new Image with the same dimensions of this image and with
+    * all the pixels initialized to the given color.
+    *
+    * @return a new Image with the same dimensions as this
+    */
+   public ImmutableImage fill(Color color) {
+      ImmutableImage target = blank();
+      target.fillInPlace(color);
+      return target.associateMetadata(metadata);
+   }
+
+   /**
+    * Creates a new Image with the same dimensions of this image and with
+    * all the pixels initialized using the given painter.
+    *
+    * @return a new Image with the same dimensions as this
+    */
+   public ImmutableImage fill(Painter painter) {
+      ImmutableImage target = blank();
+      Painter temp = painter;
+      if (painter instanceof LinearGradient) {
+         LinearGradient linear = (LinearGradient) painter;
+         if (linear.getX1() == Integer.MIN_VALUE && linear.getX2() == Integer.MAX_VALUE) {
+            temp = new LinearGradient(0, 0, linear.getColor1(), width, 0, linear.getColor2());
+         } else if (linear.getY1() == Integer.MIN_VALUE && linear.getY2() == Integer.MAX_VALUE) {
+            temp = new LinearGradient(0, 0, linear.getColor1(), 0, height, linear.getColor2());
+         }
+      }
+      Painter finalTemp = temp;
+      target.toCanvas().drawInPlace(new FilledRect(0, 0, width, height, g2 -> g2.setPainter(finalTemp)));
+      return target.associateMetadata(metadata);
+   }
+
+   /**
+    * Apply a sequence of filters in sequence.
+    * This is sugar for image.filter(filter1).filter(filter2)....
+    *
+    * @param filters the sequence filters to apply
+    * @return the result of applying each filter in turn
+    */
+   public ImmutableImage filter(Filter... filters) throws IOException {
+      ImmutableImage image = this;
+      for (Filter filter : filters) {
+         image = image.filter(filter);
+      }
+      return image;
+   }
+
+   /**
+    * Creates a copy of this image with the given filter applied.
+    * The original (this) image is unchanged.
+    *
+    * @param filter the filter to apply. See com.sksamuel.scrimage.Filter.
+    * @return A new image with the given filter applied.
+    */
+   public ImmutableImage filter(Filter filter) throws IOException {
+      int[] types = filter.types();
+      // Empty types[] means "any type works"; otherwise copy in our current
+      // type if it's listed, else convert to types[0]. The previous
+      // implementation boxed every int into Integer and built an ArrayList
+      // just to call .contains() with another autoboxed lookup.
+      int currentType = getType();
+      boolean canUseCurrent = types.length == 0;
+      if (!canUseCurrent) {
+         for (int t : types) {
+            if (t == currentType) { canUseCurrent = true; break; }
+         }
+      }
+      ImmutableImage target = canUseCurrent ? copy() : copy(types[0]);
+      filter.apply(target);
+      return target;
+   }
+
+   /**
+    * Convenience method for:
+    * fit(canvasWidth, canvasHeight, Colors.Transparent.toAWT(), ScaleMethod.Bicubic, Position.Center)
+    *
+    * @return a new Image scaled to fit inside the given canvas dimensions
+    */
+   public ImmutableImage fit(int canvasWidth,
+                             int canvasHeight) {
+      return fit(canvasWidth, canvasHeight, Colors.Transparent.toAWT(), ScaleMethod.Bicubic, Position.Center, DEFAULT_DATA_TYPE);
+   }
+
+   public ImmutableImage fit(int canvasWidth,
+                             int canvasHeight,
+                             ScaleMethod scaleMethod) {
+      return fit(canvasWidth, canvasHeight, Colors.Transparent.awt(), scaleMethod, Position.Center, DEFAULT_DATA_TYPE);
+   }
+
+   public ImmutableImage fit(int canvasWidth,
+                             int canvasHeight,
+                             Color color) {
+      return fit(canvasWidth, canvasHeight, color, ScaleMethod.Bicubic, Position.Center, DEFAULT_DATA_TYPE);
+   }
+
+   public ImmutableImage fit(int canvasWidth,
+                             int canvasHeight,
+                             Color color,
+                             Position position) {
+      return fit(canvasWidth, canvasHeight, color, ScaleMethod.Bicubic, position, DEFAULT_DATA_TYPE);
+   }
+
+   /**
+    * Returns a copy of this image with the given dimensions
+    * where the original image has been scaled to fit completely
+    * inside the new dimensions whilst retaining the original aspect ratio.
+    * <p>
+    * In other words, the image "fits" the target dimensions without losing any of the image if
+    * the aspect ratio change. Similar to taking a 16:9 movie and resizing it for a 4:3 screen. You can either
+    * lose part of the image (cover operation) or resize it so there is empty space on two sides (this operation).
+    *
+    * @param canvasWidth  the target width
+    * @param canvasHeight the target height
+    * @param scaleMethod  the algorithm to use for the scaling operation. See ScaleMethod.
+    * @param color        the color to use as the "padding" colour should the scaled original not fit exactly inside the new dimensions
+    * @param position     where to position the image inside the new canvas
+    * @return a new Image with the original image scaled to fit inside
+    */
+   public ImmutableImage fit(int canvasWidth,
+                             int canvasHeight,
+                             Color color,
+                             ScaleMethod scaleMethod,
+                             Position position) {
+      return fit(canvasWidth, canvasHeight, color, scaleMethod, position, DEFAULT_DATA_TYPE);
+   }
+
+   /**
+    * Returns a copy of this image with the given dimensions
+    * where the original image has been scaled to fit completely
+    * inside the new dimensions whilst retaining the original aspect ratio.
+    * <p>
+    * In other words, the image "fits" the target dimensions without losing any of the image if
+    * the aspect ratio change. Similar to taking a 16:9 movie and resizing it for a 4:3 screen. You can either
+    * lose part of the image (cover operation) or resize it so there is empty space on two sides (this operation).
+    *
+    * @param canvasWidth  the target width
+    * @param canvasHeight the target height
+    * @param scaleMethod  the algorithm to use for the scaling operation. See ScaleMethod.
+    * @param color        the color to use as the "padding" colour should the scaled original not fit exactly inside the new dimensions
+    * @param position     where to position the image inside the new canvas
+    * @param imageType    the AWT image type to create. See BufferedImage.TYPE_*
+    * @return a new Image with the original image scaled to fit inside
+    */
+   public ImmutableImage fit(int canvasWidth,
+                             int canvasHeight,
+                             Color color,
+                             ScaleMethod scaleMethod,
+                             Position position,
+                             int imageType) {
+      Dimension wh = DimensionTools.dimensionsToFit(new Dimension(canvasWidth, canvasHeight), new Dimension(width, height));
+      Dimension dim = position.calculateXY(canvasWidth, canvasHeight, wh.getX(), wh.getY());
+      ImmutableImage scaled = scaleTo(wh.getX(), wh.getY(), scaleMethod);
+      ImmutableImage result = ImmutableImage.filled(canvasWidth, canvasHeight, color, imageType);
+      result.overlayInPlace(scaled.awt(), dim.getX(), dim.getY());
+      return result.associateMetadata(metadata);
+   }
+
+   /**
+    * Returns the most n used colours in this image.
+    *
+    * @param colours how many colours to quantize for.
+    * @return an array of the most used colours in this image
+    */
+   public RGBColor[] quantize(int colours) {
+      MMCQ.CMap cmap = ColorThief.getColorMap(this.awt(), colours);
+      // ColorThief returns null when it cannot build a colour map, e.g. an image whose only
+      // colour is (near) white, which its default white-ignoring extractor discards entirely,
+      // leaving no pixels to quantize. Treat that as an empty palette rather than NPEing.
+      if (cmap == null) {
+         return new RGBColor[0];
+      }
+      return Arrays.stream(cmap.palette()).map(RGBColor::fromRGB).toArray(RGBColor[]::new);
+   }
+
+   /**
+    * Applies an affine transform in place.
+    *
+    * @return the BufferedImage resulting from applying the affine transform
+    */
+   private BufferedImage affineTransform(AffineTransform tx) {
+      AffineTransformOp op = new AffineTransformOp(tx, AffineTransformOp.TYPE_NEAREST_NEIGHBOR);
+      return op.filter(awt(), null);
+   }
+
+   /**
+    * Flips this image horizontally.
+    *
+    * @return The result of flipping this image horizontally.
+    */
+   public ImmutableImage flipX() {
+      AffineTransform tx = AffineTransform.getScaleInstance(-1, 1);
+      tx.translate(-width, 0);
+      return wrapAwt(affineTransform(tx), metadata);
+   }
+
+   /**
+    * Flips this image vertically.
+    *
+    * @return The result of flipping this image vertically.
+    */
+   public ImmutableImage flipY() {
+      AffineTransform tx = AffineTransform.getScaleInstance(1, -1);
+      tx.translate(0, -height);
+      return wrapAwt(affineTransform(tx), metadata);
+   }
+
+   /**
+    * Convenience method for max(maxW, maxH, ScaleMethod.Bicubic)
+    *
+    * @return a new Image constrained to the given maximum width and height
+    */
+   public ImmutableImage max(int maxW, int maxH) {
+      return max(maxW, maxH, ScaleMethod.Bicubic);
+   }
+
+   /**
+    * Returns a new image that is scaled to fit the specified bounds while retaining the same aspect ratio
+    * as the original image. The dimensions of the returned image will be the same as the result of the
+    * scaling operation. That is, no extra padding will be added to match the bounded width and height.
+    * <p>
+    * For an operation that will scale an image as well as add padding to fit the dimensions perfectly, then use fit.
+    * For an operation that will only resize smaller, and not larger, see bound.
+    * <p>
+    * Requesting a bound of 200,200 on an image of 300,600 will result in a scale to 100,200.
+    * Eg, the original image will be scaled down to fit the bounds.
+    * <p>
+    * Requesting a bound of 150,200 on an image of 150,150 will result in the same image being returned.
+    * Eg, the original image cannot be scaled up any further without exceeding the bounds.
+    * <p>
+    * Requesting a bound of 300,300 on an image of 100,150 will result in a scale to 200,300.
+    * <p>
+    * Requesting a bound of 100,1000 on an image of 50,50 will result in a scale to 100,100.
+    *
+    * @param maxW the maximum width
+    * @param maxH the maximum height
+    * @return A new image that is the result of the binding.
+    */
+   public ImmutableImage max(int maxW, int maxH, ScaleMethod scaleMethod) {
+      Dimension dimensions = DimensionTools.dimensionsToFit(new Dimension(maxW, maxH), new Dimension(width, height));
+      return scaleTo(dimensions.getX(), dimensions.getY(), scaleMethod);
+   }
+
+   public ImmutableImage op(BufferedImageOp op) {
+      BufferedImage after = op.filter(awt(), null);
+      return wrapAwt(after, metadata);
+   }
+
+   /**
+    * Returns a new image that is the result of overlaying the given image over this image.
+    * That is, the existing image ends up being "under" the image parameter.
+    * The x / y parameters determine where the (0,0) coordinate of the overlay should be placed.
+    * <p>
+    * If the image to render exceeds the boundaries of the source image, then the excess
+    * pixels will be ignored.
+    *
+    * @return a new Image with the given image overlaid.
+    */
+   public ImmutableImage overlay(AwtImage overlayImage) {
+      return overlay(overlayImage, 0, 0);
+   }
+
+   public ImmutableImage overlay(AwtImage overlayImage, int x, int y) {
+      ImmutableImage target = copy();
+      target.overlayInPlace(overlayImage.awt(), x, y);
+      return target;
+   }
+
+   public ImmutableImage resize(double scaleFactor) {
+      return resize(scaleFactor, Position.Center, Colors.Transparent.awt(), DEFAULT_DATA_TYPE);
+   }
+
+   public ImmutableImage resize(double scaleFactor, Position position) {
+      return resize(scaleFactor, position, Colors.Transparent.awt(), DEFAULT_DATA_TYPE);
+   }
+
+   public ImmutableImage resize(double scaleFactor, Color background) {
+      return resize(scaleFactor, Position.Center, background, DEFAULT_DATA_TYPE);
+   }
+
+   /**
+    * Resize will resize the canvas, it will not scale the image.
+    * This is like a "canvas resize" in Photoshop.
+    *
+    * @param scaleFactor the scaleFactor. 1 retains original size. 0.5 is half. 2 double. etc
+    * @param position    where to position the original image after the canvas size change. Defaults to centre.
+    * @param background  the color to use for expande background areas.
+    * @return a new Image that is the result of resizing the canvas.
+    */
+   public ImmutableImage resize(double scaleFactor, Position position, Color background) {
+      return resize(scaleFactor, position, background, DEFAULT_DATA_TYPE);
+   }
+
+   /**
+    * Resize will resize the canvas, it will not scale the image.
+    * This is like a "canvas resize" in Photoshop.
+    *
+    * @param scaleFactor the scaleFactor. 1 retains original size. 0.5 is half. 2 double. etc
+    * @param position    where to position the original image after the canvas size change. Defaults to centre.
+    * @param background  the color to use for expande background areas.
+    * @param imageType   the AWT image type to create. See BufferedImage.TYPE_*
+    * @return a new Image that is the result of resizing the canvas.
+    */
+   public ImmutableImage resize(double scaleFactor, Position position, Color background, int imageType) {
+      return resizeTo((int) (width * scaleFactor), (int) (height * scaleFactor), position, background, imageType);
+   }
+
+   public ImmutableImage resizeTo(int targetWidth,
+                                  int targetHeight) {
+      return resizeTo(targetWidth, targetHeight, Position.Center, Colors.Transparent.awt(), DEFAULT_DATA_TYPE);
+   }
+
+   public ImmutableImage resizeTo(int targetWidth,
+                                  int targetHeight,
+                                  Position position) {
+      return resizeTo(targetWidth, targetHeight, position, Colors.Transparent.awt(), DEFAULT_DATA_TYPE);
+   }
+
+   public ImmutableImage resizeTo(int targetWidth,
+                                  int targetHeight,
+                                  Color color) {
+      return resizeTo(targetWidth, targetHeight, Position.Center, color, DEFAULT_DATA_TYPE);
+   }
+
+   /**
+    * Resize will resize the canvas, it will not scale the image.
+    * This is like a "canvas resize" in Photoshop.
+    * <p>
+    * If the dimensions are smaller than the current canvas size
+    * then the image will be cropped.
+    * <p>
+    * The position parameter determines how the original image will be positioned on the new
+    * canvas.
+    *
+    * @param targetWidth  the target width
+    * @param targetHeight the target height
+    * @param position     where to position the original image after the canvas size change
+    * @param background   the background color if the canvas was enlarged
+    * @return a new Image that is the result of resizing the canvas.
+    */
+   public ImmutableImage resizeTo(int targetWidth,
+                                  int targetHeight,
+                                  Position position,
+                                  Color background) {
+      return resizeTo(targetWidth, targetHeight, position, background, DEFAULT_DATA_TYPE);
+   }
+
+   /**
+    * Resize will resize the canvas, it will not scale the image.
+    * This is like a "canvas resize" in Photoshop.
+    * <p>
+    * If the dimensions are smaller than the current canvas size
+    * then the image will be cropped.
+    * <p>
+    * The position parameter determines how the original image will be positioned on the new
+    * canvas.
+    *
+    * @param targetWidth  the target width
+    * @param targetHeight the target height
+    * @param position     where to position the original image after the canvas size change
+    * @param background   the background color if the canvas was enlarged
+    * @param imageType    the type of the image to create. See BufferedImage.TYPE_*
+    * @return a new Image that is the result of resizing the canvas.
+    */
+   public ImmutableImage resizeTo(int targetWidth,
+                                  int targetHeight,
+                                  Position position,
+                                  Color background,
+                                  int imageType) {
+      if (targetWidth == width && targetHeight == height) return this;
+      else {
+         Dimension dim = position.calculateXY(targetWidth, targetHeight, width, height);
+         ImmutableImage result = filled(targetWidth, targetHeight, background, imageType);
+         result.overlayInPlace(awt(), dim.getX(), dim.getY());
+         return result.associateMetadata(metadata);
+      }
+   }
+
+   public ImmutableImage resizeToRatio(double targetRatio) {
+      return resizeToRatio(targetRatio, Position.Center, Colors.Transparent.awt(), DEFAULT_DATA_TYPE);
+   }
+
+   /**
+    * Resize will resize the canvas, it will not scale the image.
+    * This is like a "canvas resize" in Photoshop.
+    * <p>
+    * Depending on ratio will increase either width or height.
+    * <p>
+    * The position parameter determines how the original image will be positioned on the new
+    * canvas.
+    *
+    * @param targetRatio width divided by height
+    * @param position    where to position the original image after the canvas size change
+    * @param background  the background color if the canvas was enlarged
+    * @return a new Image that is the result of resizing the canvas.
+    */
+   public ImmutableImage resizeToRatio(double targetRatio, Position position, Color background) {
+      return resizeToRatio(targetRatio, position, background, DEFAULT_DATA_TYPE);
+   }
+
+   /**
+    * Resize will resize the canvas, it will not scale the image.
+    * This is like a "canvas resize" in Photoshop.
+    * <p>
+    * Depending on ratio will increase either width or height.
+    * <p>
+    * The position parameter determines how the original image will be positioned on the new
+    * canvas.
+    *
+    * @param targetRatio width divided by height
+    * @param position    where to position the original image after the canvas size change
+    * @param background  the background color if the canvas was enlarged
+    * @param imageType   the AWT image type to create. See BufferedImage.TYPE_*
+    * @return a new Image that is the result of resizing the canvas.
+    * @throws IllegalArgumentException if the target ratio is NaN, zero or negative.
+    */
+   public ImmutableImage resizeToRatio(double targetRatio, Position position, Color background, int imageType) {
+
+      // Validate up front: a zero ratio would divide to Infinity and the int cast
+      // would silently produce Integer.MAX_VALUE (an absurd allocation), a negative
+      // ratio a negative dimension, and NaN a zero dimension - all failing later
+      // with confusing errors instead of failing fast on the bad input.
+      if (Double.isNaN(targetRatio) || targetRatio <= 0)
+         throw new IllegalArgumentException(
+            "Target ratio (width / height) must be a positive number but was " + targetRatio);
+
+      double currRatio = ratio();
+      if (currRatio == targetRatio) return this;
+      else if (currRatio > targetRatio) {
+         int targetHeight = (int) (width / targetRatio); // cannot be zero because it's larger than currRatio
+         return resizeTo(width, targetHeight, position, background, imageType);
+      } else {
+         int targetWidth = (int) (height * targetRatio);
+         return resizeTo(targetWidth, height, position, background, imageType);
+      }
+   }
+
+   /**
+    * Resize will resize the canvas, it will not scale the image.
+    * This is like a "canvas resize" in Photoshop.
+    *
+    * @return a new Image that is the result of resizing the canvas.
+    */
+   public ImmutableImage resizeToHeight(int targetHeight) {
+      return resizeToHeight(targetHeight, Position.Center, Colors.Transparent.toAWT(), DEFAULT_DATA_TYPE);
+   }
+
+   /**
+    * Resize will resize the canvas, it will not scale the image.
+    * This is like a "canvas resize" in Photoshop.
+    *
+    * @param position where to position the original image after the canvas size change
+    * @return a new Image that is the result of resizing the canvas.
+    */
+   public ImmutableImage resizeToHeight(int targetHeight, Position position, Color background) {
+      return resizeToHeight(targetHeight, position, background, DEFAULT_DATA_TYPE);
+   }
+
+   /**
+    * Resize will resize the canvas, it will not scale the image.
+    * This is like a "canvas resize" in Photoshop.
+    *
+    * @param position  where to position the original image after the canvas size change
+    * @param imageType the AWT image type to create. See BufferedImage.TYPE_*
+    * @return a new Image that is the result of resizing the canvas.
+    */
+   public ImmutableImage resizeToHeight(int targetHeight, Position position, Color background, int imageType) {
+      // Clamp the derived width to at least 1: for an extreme aspect ratio (e.g. a 1x1000
+      // image) the integer arithmetic floors to 0, which then fails creating a 0-width canvas.
+      int targetWidth = Math.max(1, (int) (targetHeight / (double) height * width));
+      return resizeTo(targetWidth, targetHeight, position, background, imageType);
+   }
+
+   /**
+    * Resize will resize the canvas, it will not scale the image.
+    * This is like a "canvas resize" in Photoshop.
+    *
+    * @return a new Image that is the result of resizing the canvas.
+    */
+   public ImmutableImage resizeToWidth(int targetWidth) {
+      return resizeToWidth(targetWidth, Position.Center, Colors.Transparent.toAWT(), DEFAULT_DATA_TYPE);
+   }
+
+   /**
+    * Resize will resize the canvas, it will not scale the image.
+    * This is like a "canvas resize" in Photoshop.
+    *
+    * @param position where to position the original image after the canvas size change
+    * @return a new Image that is the result of resizing the canvas.
+    */
+   public ImmutableImage resizeToWidth(int targetWidth, Position position, Color background) {
+      return resizeToWidth(targetWidth, position, background, DEFAULT_DATA_TYPE);
+   }
+
+   /**
+    * Resize will resize the canvas, it will not scale the image.
+    * This is like a "canvas resize" in Photoshop.
+    *
+    * @param position  where to position the original image after the canvas size change
+    * @param imageType the AWT image type to create. See BufferedImage.TYPE_*
+    * @return a new Image that is the result of resizing the canvas.
+    */
+   public ImmutableImage resizeToWidth(int targetWidth, Position position, Color background, int imageType) {
+      // Clamp the derived height to at least 1: for an extreme aspect ratio (e.g. a 1000x1
+      // image) the integer arithmetic floors to 0, which then fails creating a 0-height canvas.
+      int targetHeight = Math.max(1, (int) (targetWidth / (double) width * height));
+      return resizeTo(targetWidth, targetHeight, position, background, imageType);
+   }
+
+   /**
+    * Returns a copy of this image rotated 90 degrees anti-clockwise (counter clockwise to US English speakers).
+    *
+    * @return a copy of this image rotated 90 degrees anti-clockwise
+    */
+   public ImmutableImage rotateLeft() {
+      Radians angle = new Radians(-Math.PI / 2);
+      return rotate(angle);
+   }
+
+   /**
+    * Returns a copy of this image rotated 90 degrees clockwise.
+    *
+    * @return a copy of this image rotated 90 degrees clockwise
+    */
+   public ImmutableImage rotateRight() {
+      Radians angle = new Radians(Math.PI / 2);
+      return rotate(angle);
+   }
+
+   public ImmutableImage rotate(Radians radians) {
+      return rotate(radians, Color.BLACK);
+   }
+
+   public ImmutableImage rotate(Radians radians, Color bgcolor) {
+      return wrapAwt(rotateByRadians(radians, bgcolor), metadata);
+   }
+
+   public ImmutableImage rotate(Degrees degrees) {
+      return rotate(degrees.toRadians());
+   }
+
+   public ImmutableImage rotate(Degrees degrees, Color bgcolor) {
+      return rotate(degrees.toRadians(), bgcolor);
+   }
+
+   /**
+    * Creates a new image which is the result of this image
+    * padded with the given number of pixels on each edge.
+    * <p>
+    * Eg, requesting a pad of 30 on an image of 250,300 will result
+    * in a new image with a canvas size of 310,360
+    *
+    * @param size  the number of pixels to add on each edge
+    * @param color the background of the padded area.
+    * @return A new image that is the result of the padding
+    */
+   public ImmutableImage pad(int size, Color color) {
+      return padTo(width + size * 2, height + size * 2, color);
+   }
+
+   public ImmutableImage padTo(int targetWidth, int targetHeight) {
+      return padTo(targetWidth, targetHeight, Colors.Transparent.awt());
+   }
+
+   /**
+    * Creates a new ImmutableImage which is the result of this image padded to the canvas size specified.
+    * If this image is already larger than the specified dimensions then the sizes of the existing
+    * image will be used instead.
+    * <p>
+    * Eg, requesting a pad of 200,200 on an image of 250,300 will result
+    * in keeping the 250,300.
+    * <p>
+    * Eg2, requesting a pad of 300,300 on an image of 400,250 will result
+    * in the width staying at 400 and the height padded to 300.
+    *
+    * @param targetWidth  the size of the output canvas width
+    * @param targetHeight the size of the output canvas height
+    * @param color        the background of the padded area.
+    * @return A new image that is the result of the padding
+    */
+   public ImmutableImage padTo(int targetWidth, int targetHeight, Color color) {
+      int w = Math.max(width, targetWidth);
+      int h = Math.max(height, targetHeight);
+      int x = (int) ((w - width) / 2.0);
+      int y = (int) ((h - height) / 2.0);
+      return padWith(x, y, w - width - x, h - height - y, color);
+   }
+
+   /**
+    * Returns a square version of this image by padding the shorter side, centring the existing
+    * image within the new canvas. The added area is transparent. An image that is already square
+    * is returned unchanged in size.
+    *
+    * @return a new square Image.
+    */
+   public ImmutableImage toSquare() {
+      return toSquare(Colors.Transparent.awt());
+   }
+
+   /**
+    * Returns a square version of this image by padding the shorter side with the given colour,
+    * centring the existing image within the new canvas. An image that is already square is
+    * returned unchanged in size.
+    *
+    * @param color the background colour for the padded area.
+    * @return a new square Image.
+    */
+   public ImmutableImage toSquare(Color color) {
+      int size = Math.max(width, height);
+      return padTo(size, size, color);
+   }
+
+   public ImmutableImage padWith(int left, int top, int right, int bottom) {
+      return padWith(left, top, right, bottom, Colors.Transparent.awt());
+   }
+
+   /**
+    * Creates a new ImmutableImage by adding the given number of columns/rows on left, top, right and bottom.
+    *
+    * @param left   the number of columns/pixels to add on the left
+    * @param top    the number of rows/pixels to add to the top
+    * @param right  the number of columns/pixels to add on the right
+    * @param bottom the number of rows/pixels to add to the bottom
+    * @param color  the background of the padded area.
+    * @return A new image that is the result of the padding operation.
+    */
+   public ImmutableImage padWith(int left, int top, int right, int bottom, Color color) {
+      int w = width + left + right;
+      int h = height + top + bottom;
+      // filled() returns a fresh, unshared image, so draw straight into it with
+      // overlayInPlace. Going through overlay() would clone that just-created
+      // buffer first (a full-image copy) for no reason.
+      ImmutableImage result = filled(w, h, color);
+      result.overlayInPlace(awt(), left, top);
+      return result.associateMetadata(metadata);
+   }
+
+   /**
+    * Creates a new Image by adding k amount of rows of pixels to the top.
+    * This is a convenience method for calling padWith(0,k,0,0,color).
+    *
+    * @param k     the number of rows to pad by
+    * @param color the color that should be used for the new rows
+    * @return the new Image
+    */
+   public ImmutableImage padTop(int k, Color color) {
+      return padWith(0, k, 0, 0, color);
+   }
+
+   /**
+    * Creates a new Image by adding k amount of rows of pixels to the bottom.
+    * This is a convenience method for calling padWith(0,0,0,k,color).
+    *
+    * @param k     the number of rows to pad by
+    * @param color the color that should be used for the new rows
+    * @return the new Image
+    */
+   public ImmutableImage padBottom(int k, Color color) {
+      return padWith(0, 0, 0, k, color);
+   }
+
+   /**
+    * Creates a new Image by adding k columns of pixels to the left.
+    * This is a convenience method for calling padWith(k,0,0,0,Transparent).
+    *
+    * @param k the number of columns to pad by
+    * @return the new Image
+    */
+   public ImmutableImage padLeft(int k) {
+      return padLeft(k, Colors.Transparent.toAWT());
+   }
+
+   /**
+    * Creates a new Image by adding k columns of pixels to the left.
+    * This is a convenience method for calling padWith(k,0,0,0,color).
+    *
+    * @param k     the number of columns to pad by
+    * @param color the color that should be used for the new pixels
+    * @return the new Image
+    */
+   public ImmutableImage padLeft(int k, Color color) {
+      return padWith(k, 0, 0, 0, color);
+   }
+
+   /**
+    * Creates a new Image by adding k columns of pixels to the right.
+    * This is a convenience method for calling padWith(0,0,k,0,color).
+    *
+    * @param k the number of columns to pad by
+    * @return the new Image
+    */
+   public ImmutableImage padRight(int k) {
+      return padRight(k, Colors.Transparent.toAWT());
+   }
+
+   /**
+    * Creates a new Image by adding k columns of pixels to the right.
+    * This is a convenience method for calling padWith(0,0,k,0,color).
+    *
+    * @param k     the number of columns to pad by
+    * @param color the color that should be used for the new pixels
+    * @return the new Image
+    */
+   public ImmutableImage padRight(int k, Color color) {
+      return padWith(0, 0, k, 0, color);
+   }
+
+   /**
+    * Returns a new ImmutableImage with transparency replaced with the given color.
+    *
+    * @return a new ImmutableImage with transparency replaced by the given color
+    */
+   public ImmutableImage removeTransparency(Color color) {
+      // Same per-pixel maths as MutableImage.replaceTransparencyInPlace, but routed
+      // through transformPixels so the redundant full-raster copy is skipped.
+      int cr = color.getRed(), cg = color.getGreen(), cb = color.getBlue(), ca = color.getAlpha();
+      return transformPixels((offset, p) -> PixelTools.replaceTransparencyWithColor(p, cr, cg, cb, ca));
+   }
+
+   /**
+    * Convenience method for scaleToWidth(targetWith, scaleMethod)
+    *
+    * @return a new Image scaled to the given target width
+    */
+   public ImmutableImage scaleToWidth(int targetWidth) {
+      return scaleToWidth(targetWidth, ScaleMethod.Bicubic);
+   }
+
+   /**
+    * Scale will resize the canvas and scale the image to match.
+    * This is like a "image resize" in Photoshop.
+    * <p>
+    * scaleToWidth will scale the image so that the new image has a width that matches the
+    * given targetWidth and the height is determined by the original aspect ratio.
+    * <p>
+    * Eg, an image of 200,300 with a scaleToWidth of 400 will result
+    * in a scaled image of 400,600
+    *
+    * @param targetWidth the target width
+    * @param scaleMethod the type of scaling method to use.
+    * @return a new Image that is the result of scaling this image
+    */
+   public ImmutableImage scaleToWidth(int targetWidth, ScaleMethod scaleMethod) {
+      return scaleToWidth(targetWidth, scaleMethod, true);
+   }
+
+   public ImmutableImage scaleToWidth(int targetWidth, ScaleMethod scaleMethod, boolean keepAspectRatio) {
+      // Clamp the derived height to at least 1: for an extreme aspect ratio (e.g. a 1000x1
+      // image scaled to width 1) the integer arithmetic floors to 0, which then fails
+      // creating a 0-height image. Mirrors the clamp in resizeToWidth.
+      int targetHeight = keepAspectRatio ? Math.max(1, (int) (targetWidth / (double) width * height)) : height;
+      return scaleTo(targetWidth, targetHeight, scaleMethod);
+   }
+
+   /**
+    * Convenience method for scaleToHeight(targetHeight, ScaleMethod.Bicubic)
+    *
+    * @return a new Image scaled to the given target height
+    */
+   public ImmutableImage scaleToHeight(int targetHeight) {
+      return scaleToHeight(targetHeight, ScaleMethod.Bicubic);
+   }
+
+   /**
+    * Convenience method for scaleToHeight(targetHeight, scaleMethod, true)
+    *
+    * @return a new Image scaled to the given target height using the given scale method
+    */
+   public ImmutableImage scaleToHeight(int targetHeight, ScaleMethod scaleMethod) {
+      return scaleToHeight(targetHeight, scaleMethod, true);
+   }
+
+   /**
+    * Scale will resize the canvas and scale the image to match.
+    * This is like a "image resize" in Photoshop.
+    * <p>
+    * scaleToHeight will scale the image so that the new image has a height that matches the
+    * given targetHeight.
+    * <p>
+    * If keepAspectRatio is true, then the width will also be scaled so that the aspect ratio
+    * of the image does not change.
+    * If keepAspectRatio is false, then the width will stay the same.
+    * <p>
+    * Eg, an image of 200,300 with a scaleToHeight of 450 and keepAspectRatio of true will result
+    * in a scaled image of 300,450 (because 300 to 450 is 1.5 and so 200 x 1.5 is 300).
+    *
+    * @param targetHeight    the target height
+    * @param scaleMethod     the type of scaling method to use.
+    * @param keepAspectRatio whether the width should also be scaled to keep the aspect ratio the same.
+    * @return a new Image that is the result of scaling this image
+    */
+   public ImmutableImage scaleToHeight(int targetHeight, ScaleMethod scaleMethod, boolean keepAspectRatio) {
+      // Clamp the derived width to at least 1: for an extreme aspect ratio (e.g. a 1x1000
+      // image scaled to height 1) the integer arithmetic floors to 0, which then fails
+      // creating a 0-width image. Mirrors the clamp in resizeToHeight.
+      int targetWidth = keepAspectRatio ? Math.max(1, (int) (targetHeight / (double) height * width)) : width;
+      return scaleTo(targetWidth, targetHeight, scaleMethod);
+   }
+
+   public ImmutableImage scaleHeightToRatio(double ratio) {
+      return scaleHeightToRatio(ratio, ScaleMethod.Bicubic);
+   }
+
+   public ImmutableImage scaleHeightToRatio(double ratio, ScaleMethod scaleMethod) {
+      return scaleToHeight((int) (height * ratio), scaleMethod);
+   }
+
+   public ImmutableImage scale(double scaleFactor) {
+      return scale(scaleFactor, ScaleMethod.Bicubic);
+   }
+
+   /**
+    * Scale will resize the canvas and the image.
+    * This is like a "image resize" in Photoshop.
+    *
+    * @param scaleFactor the target increase or decrease. 1 is the same as original.
+    * @param scaleMethod the type of scaling method to use.
+    * @return a new Image that is the result of scaling this image
+    */
+   public ImmutableImage scale(double scaleFactor, ScaleMethod scaleMethod) {
+      return scaleTo((int) (width * scaleFactor), (int) (height * scaleFactor), scaleMethod);
+   }
+
+   /**
+    * Convenience method for scaleTo(targetWidth, targetHeight, ScaleMethod.Bicubic);
+    *
+    * @return a new Image scaled to the given target width and height
+    */
+   public ImmutableImage scaleTo(int targetWidth,
+                                 int targetHeight) {
+      return scaleTo(targetWidth, targetHeight, ScaleMethod.Bicubic);
+   }
+
+   /**
+    * Scale will resize both the canvas and the image.
+    * This is like a "image resize" in Photoshop.
+    * <p>
+    * The size of the scaled instance are taken from the given
+    * width and height parameters.
+    *
+    * @param targetWidth  the target width
+    * @param targetHeight the target height
+    * @param scaleMethod  the type of scaling method to use. Defaults to SmoothScale
+    * @return a new Image that is the result of scaling this image
+    */
+   public ImmutableImage scaleTo(int targetWidth,
+                                 int targetHeight,
+                                 ScaleMethod scaleMethod) {
+      if (targetWidth == width && targetHeight == height) return this;
+      switch (scaleMethod) {
+         case FastScale:
+            if (targetWidth < width && targetHeight < height && awt().getType() == BufferedImage.TYPE_INT_ARGB)
+               return wrapAwt(fastScaleScrimage(targetWidth, targetHeight), metadata);
+            else
+               return wrapAwt(fastScaleAwt(targetWidth, targetHeight), metadata);
+         case Lanczos3:
+            Lanczos3Filter lan = ResampleFilters.lanczos3Filter;
+            // resample() preserves metadata; the previous code re-wrapped via
+            // wrapAwt(awt, type) which uses ImageMetadata.empty and silently
+            // dropped EXIF/etc. on every scale.
+            return resample(lan, targetWidth, targetHeight);
+         case BSpline:
+            BSplineFilter bs = ResampleFilters.bSplineFilter;
+            return resample(bs, targetWidth, targetHeight);
+         case Bilinear:
+            TriangleFilter t = ResampleFilters.triangleFilter;
+            return resample(t, targetWidth, targetHeight);
+         case Progressive:
+            if (targetWidth >= width || targetHeight >= height)
+               return scaleTo(targetWidth, targetHeight, ScaleMethod.Bicubic);
+            BufferedImage result = ProgressiveScale.scale(awt(), targetWidth, targetHeight, RenderingHints.VALUE_INTERPOLATION_BILINEAR);
+            return wrapAwt(result, metadata);
+         case Bicubic:
+            BiCubicFilter b = ResampleFilters.biCubicFilter;
+            return resample(b, targetWidth, targetHeight);
+         default:
+            throw new UnsupportedOperationException();
+      }
+   }
+
+   /**
+    * Resamples this image with the given filter, premultiplying alpha so the
+    * colour of transparent pixels does not bleed into visible neighbours.
+    * <p>
+    * ResampleOp blends the colour channels with the filter weights without
+    * weighting by alpha. Where a transparent source pixel holds arbitrary
+    * (often black) colour, that colour leaks into nearby visible pixels,
+    * producing dark/bright halos along transparency edges after scaling. The
+    * correct approach is to resample in premultiplied-alpha space, which is
+    * linear and therefore separable. We do it here on plain ARGB ints — rather
+    * than inside ResampleOp — so it is independent of that class's internal
+    * (and type-dependent) channel ordering.
+    * <p>
+    * Fully opaque images take the original path unchanged, so their output is
+    * byte-for-byte identical to before.
+    *
+    * @return a new Image resampled to the given target width and height
+    */
+   private ImmutableImage resample(ResampleFilter filter, int targetWidth, int targetHeight) {
+      // ResampleOp rejects targets smaller than 3x3 and sources smaller than the filter
+      // support — geometries that arise from extreme aspect ratios (e.g. fit/max/bound
+      // or cover on a 1x1000 image). Fall back to nearest-neighbour instead of throwing.
+      // canResample mirrors doFilter's exact validation, so this only triggers where
+      // resampling previously crashed.
+      if (!ResampleOp.canResample(filter, width, height, targetWidth, targetHeight)) {
+         return scaleTo(targetWidth, targetHeight, ScaleMethod.FastScale);
+      }
+      ResampleOp resampleOp = new ResampleOp(filter, targetWidth, targetHeight);
+      if (!awt().getColorModel().hasAlpha())
+         return op(resampleOp);
+
+      int[] src = awt().getRGB(0, 0, width, height, null, 0, width);
+      boolean hasTransparency = false;
+      for (int p : src) {
+         if (((p >>> 24) & 0xFF) != 0xFF) {
+            hasTransparency = true;
+            break;
+         }
+      }
+      if (!hasTransparency)
+         return op(resampleOp);
+
+      // Premultiply: colour' = colour * alpha / 255.
+      int[] prem = new int[src.length];
+      for (int i = 0; i < src.length; i++) {
+         int p = src[i];
+         int a = (p >>> 24) & 0xFF;
+         int r = ((p >> 16) & 0xFF) * a / 255;
+         int g = ((p >> 8) & 0xFF) * a / 255;
+         int bl = (p & 0xFF) * a / 255;
+         prem[i] = (a << 24) | (r << 16) | (g << 8) | bl;
+      }
+      ImmutableImage premul = ImmutableImage.create(width, height, BufferedImage.TYPE_INT_ARGB);
+      premul.awt().setRGB(0, 0, width, height, prem, 0, width);
+
+      BufferedImage scaled = resampleOp.filter(premul.awt(), null);
+
+      // Un-premultiply: colour = colour' * 255 / alpha (alpha == 0 → fully clear).
+      int sw = scaled.getWidth();
+      int sh = scaled.getHeight();
+      int[] out = scaled.getRGB(0, 0, sw, sh, null, 0, sw);
+      for (int i = 0; i < out.length; i++) {
+         int p = out[i];
+         int a = (p >>> 24) & 0xFF;
+         if (a == 0) {
+            out[i] = 0;
+            continue;
+         }
+         int r = Math.min(255, ((p >> 16) & 0xFF) * 255 / a);
+         int g = Math.min(255, ((p >> 8) & 0xFF) * 255 / a);
+         int bl = Math.min(255, (p & 0xFF) * 255 / a);
+         out[i] = (a << 24) | (r << 16) | (g << 8) | bl;
+      }
+      ImmutableImage result = ImmutableImage.create(sw, sh, DEFAULT_DATA_TYPE);
+      result.awt().setRGB(0, 0, sw, sh, out, 0, sw);
+      return result.associateMetadata(metadata);
+   }
+
+   /**
+    * Extracts a subimage, but using subpixel interpolation.
+    *
+    * @return a new Image extracted using subpixel interpolation
+    */
+   public ImmutableImage subpixelSubimage(double x,
+                                          double y,
+                                          int subWidth,
+                                          int subHeight) {
+      // The loop reads subpixel(xIndex + x) for xIndex in [0, subWidth),
+      // so the maximum sub-pixel x argument is (subWidth - 1) + x. The
+      // subpixel() contract requires arg < width, hence x + subWidth ≤ width.
+      // Same applies to y / subHeight / height. The previous bounds used
+      // strict < and rejected valid full-width / full-height extractions.
+      //
+      // Validate explicitly: assert is a no-op in production JVMs by default,
+      // and out-of-range inputs then surfaced as ArrayIndexOutOfBoundsException
+      // from the underlying getRGB call deep inside the loop with no context.
+      if (x < 0 || y < 0 || x + subWidth > width || y + subHeight > height) {
+         throw new IllegalArgumentException(
+            "subpixelSubimage region (x=" + x + ", y=" + y
+               + ", subWidth=" + subWidth + ", subHeight=" + subHeight
+               + ") falls outside the source image (" + width + "x" + height + ")");
+      }
+
+      // Walk the output grid and write each interpolated ARGB int directly
+      // into a row-major buffer. The previous implementation allocated a
+      // Pixel per output cell and routed through wrapPixels → create(Pixel[]),
+      // which itself re-extracted the argb from each Pixel — a wasted round
+      // trip now that subpixel() already returns a packed ARGB int.
+      int[] argb = new int[subWidth * subHeight];
+      // Reuse a single interpolator backed by one bulk read of the source
+      // pixels, rather than constructing a fresh interpolator (each issuing
+      // scalar getRGB calls) for every output cell via the inherited
+      // subpixel(x, y).
+      int[] sourcePixels = awt().getRGB(0, 0, width, height, null, 0, width);
+      LinearSubpixelInterpolator interpolator = new LinearSubpixelInterpolator(this, sourcePixels);
+      int k = 0;
+      for (int yIndex = 0; yIndex < subHeight; yIndex++) {
+         for (int xIndex = 0; xIndex < subWidth; xIndex++) {
+            argb[k++] = interpolator.subpixel(xIndex + x, yIndex + y);
+         }
+      }
+      ImmutableImage result = ImmutableImage.create(subWidth, subHeight, DEFAULT_DATA_TYPE);
+      result.awt().setRGB(0, 0, subWidth, subHeight, argb, 0, subWidth);
+      return result.associateMetadata(metadata);
+   }
+
+   /**
+    * Extract a patch, centered at a subpixel point.
+    *
+    * @return a new Image patch centered at the given subpixel point
+    */
+   public ImmutableImage subpixelSubimageCenteredAtPoint(double x,
+                                                         double y,
+                                                         double xRadius,
+                                                         double yRadius) {
+      double xWidth = 2 * xRadius;
+      double yWidth = 2 * yRadius;
+
+      // The dimensions of the extracted patch must be integral.
+      assert xWidth == Math.round(xWidth);
+      assert yWidth == Math.round(yWidth);
+
+      return subpixelSubimage(
+         x - xRadius,
+         y - yRadius,
+         (int) Math.round(xWidth),
+         (int) Math.round(yWidth));
+   }
+
+   /**
+    * Returns a new Image that is a subimage or region of the original image.
+    *
+    * @param x the start x coordinate
+    * @param y the start y coordinate
+    * @param w the width of the subimage
+    * @param h the height of the subimage
+    * @return a new Image that is the subimage
+    */
+   public ImmutableImage subimage(int x, int y, int w, int h) {
+      if (w <= 0) throw new RuntimeException("Width cannot be <= 0");
+      if (h <= 0) throw new RuntimeException("Height cannot be <= 0");
+      // Pull the region directly into an ARGB int[] and bulk setRGB it into
+      // a fresh image. The previous implementation called pixels(x, y, w, h)
+      // to materialise a Pixel[w*h] just so wrapPixels → create(Pixel[])
+      // could re-extract argb from each Pixel.
+      int[] argb = awt().getRGB(x, y, w, h, null, 0, w);
+      // Preserve the source image's type so cropping (and trim/autocrop/takeX,
+      // which delegate here) doesn't silently promote e.g. a TYPE_INT_RGB image
+      // to TYPE_INT_ARGB. TYPE_CUSTOM (0) can't be fed to the BufferedImage type
+      // constructor, so fall back to the default ARGB type for it.
+      int type = awt().getType();
+      if (type == BufferedImage.TYPE_CUSTOM) type = DEFAULT_DATA_TYPE;
+      ImmutableImage result = ImmutableImage.create(w, h, type);
+      result.awt().setRGB(0, 0, w, h, argb, 0, w);
+      return result.associateMetadata(metadata);
+   }
+
+   public ImmutableImage subimage(Rectangle rectangle) {
+      if (rectangle == null)
+         return this;
+      else
+         return subimage(rectangle.x, rectangle.y, rectangle.width, rectangle.height);
+   }
+
+   /**
+    * Returns a new Image which is the source image, but only keeping a max of k columns from the left.
+    *
+    * @return a new Image keeping at most k columns from the left
+    */
+   public ImmutableImage takeLeft(int k) {
+      return subimage(0, 0, Math.min(k, width), height);
+   }
+
+   /**
+    * Returns a new Image which is the source image, but only keeping a max of k columns from the right.
+    *
+    * @return a new Image keeping at most k columns from the right
+    */
+   public ImmutableImage takeRight(int k) {
+      // trim k to the max we can use, which is the width
+      int maxK = Math.min(k, width);
+      return subimage(width - maxK, 0, maxK, height);
+   }
+
+   /**
+    * Returns a new Image which is the source image, but only keeping a max of k rows from the top.
+    *
+    * @return a new Image keeping at most k rows from the top
+    */
+   public ImmutableImage takeTop(int k) {
+      return subimage(0, 0, width, Math.min(k, height));
+   }
+
+   /**
+    * Returns a new Image which is the source image, but only keeping a max of k rows from the bottom.
+    *
+    * @return a new Image keeping at most k rows from the bottom
+    */
+   public ImmutableImage takeBottom(int k) {
+      // trim k to the max we can use, which is the height
+      int maxK = Math.min(k, height);
+      return subimage(0, height - maxK, width, maxK);
+   }
+
+   /**
+    * Returns a new Image with the leftmost {@code amount} columns removed, shrinking
+    * the width by that amount. For example {@code dropLeft(100)} removes the first
+    * 100 columns and the result is 100 pixels narrower.
+    *
+    * @param amount the number of columns to remove from the left edge
+    * @return a new Image with the leftmost columns removed
+    */
+   public ImmutableImage dropLeft(int amount) {
+      int drop = Math.max(0, Math.min(amount, width - 1));
+      return subimage(drop, 0, width - drop, height);
+   }
+
+   /**
+    * Returns a new Image with the rightmost {@code amount} columns removed, shrinking
+    * the width by that amount.
+    *
+    * @param amount the number of columns to remove from the right edge
+    * @return a new Image with the rightmost columns removed
+    */
+   public ImmutableImage dropRight(int amount) {
+      int drop = Math.max(0, Math.min(amount, width - 1));
+      return subimage(0, 0, width - drop, height);
+   }
+
+   /**
+    * Returns a new Image with the topmost {@code amount} rows removed, shrinking the
+    * height by that amount.
+    *
+    * @param amount the number of rows to remove from the top edge
+    * @return a new Image with the top rows removed
+    */
+   public ImmutableImage dropTop(int amount) {
+      int drop = Math.max(0, Math.min(amount, height - 1));
+      return subimage(0, drop, width, height - drop);
+   }
+
+   /**
+    * Returns a new Image with the bottommost {@code amount} rows removed, shrinking
+    * the height by that amount.
+    *
+    * @param amount the number of rows to remove from the bottom edge
+    * @return a new Image with the bottom rows removed
+    */
+   public ImmutableImage dropBottom(int amount) {
+      int drop = Math.max(0, Math.min(amount, height - 1));
+      return subimage(0, 0, width, height - drop);
+   }
+
+   /**
+    * Returns an image that is the result of translating the image while keeping the same
+    * view window. Eg, if translating by 10,5 then all pixels will move 10 to the right, and 5 down.
+    * This would mean 10 columns and 5 rows of background added to the left and top.
+    * <p>
+    * This method will use transparency for the color of the displaced pixels.
+    *
+    * @return a new Image with this image translated.
+    */
+   public ImmutableImage translate(int x, int y) {
+      return translate(x, y, Colors.Transparent.toAWT());
+   }
+
+   /**
+    * Returns an image that is the result of translating the image while keeping the same
+    * view window. Eg, if translating by 10,5 then all pixels will move 10 to the right, and 5 down.
+    * This would mean 10 columns and 5 rows of background added to the left and top.
+    *
+    * @return a new Image with this image translated.
+    */
+   public ImmutableImage translate(int x, int y, Color bg) {
+      // fill() returns a fresh, unshared image, so draw straight into it with
+      // overlayInPlace rather than overlay(), which would clone it first.
+      ImmutableImage result = fill(bg);
+      result.overlayInPlace(awt(), x, y);
+      return result.associateMetadata(metadata);
+   }
+
+   /**
+    * Removes the given amount of pixels from each edge; like a crop operation.
+    *
+    * @param amount the number of pixels to trim from each edge
+    * @return a new Image with the dimensions width-trim*2, height-trim*2
+    */
+   public ImmutableImage trim(int amount) {
+      return trim(amount, amount, amount, amount);
+   }
+
+   /**
+    * Removes the given amount of pixels from each edge; like a crop operation.
+    *
+    * @param left   the number of pixels to trim from the left
+    * @param top    the number of pixels to trim from the top
+    * @param right  the number of pixels to trim from the right
+    * @param bottom the number of pixels to trim from the bottom
+    * @return a new Image with the dimensions width-trim*2, height-trim*2
+    */
+   public ImmutableImage trim(int left, int top, int right, int bottom) {
+      // Validate up front so the caller gets a useful diagnostic (which
+      // arguments + the source dimensions) rather than the bare
+      // "Width cannot be <= 0" / "Height cannot be <= 0" subimage throws
+      // on negative or zero remaining dimensions.
+      if (left < 0 || top < 0 || right < 0 || bottom < 0) {
+         throw new IllegalArgumentException(
+            "trim amounts must be non-negative; got "
+               + "left=" + left + ", top=" + top + ", right=" + right + ", bottom=" + bottom);
+      }
+      if (left + right >= width || top + bottom >= height) {
+         throw new IllegalArgumentException(
+            "trim amounts leave no remaining image: "
+               + "left+right=" + (left + right) + " (width=" + width + "), "
+               + "top+bottom=" + (top + bottom) + " (height=" + height + ")");
+      }
+      // Use subimage(...) — exact pixel copy that preserves alpha precision
+      // and metadata. The previous create(...).overlay(this, -left, -top)
+      // route went through Graphics2D.drawImage which composites via SrcOver
+      // (premultiplies alpha and rounds away ±1 from each colour channel
+      // for non-255 alpha — same root cause as #414/#416), and dropped
+      // the source's metadata.
+      return subimage(left, top, width - left - right, height - bottom - top);
+   }
+
+   /**
+    * Removes the specified amount of columns of pixels from the left side of the image.
+    * This is a convenience method for trim(k,0,0,0).
+    *
+    * @param k how many columns of pixels to remove
+    * @return a new image with k columns from the left removed
+    */
+   public ImmutableImage trimLeft(int k) {
+      return trim(k, 0, 0, 0);
+   }
+
+   /**
+    * Removes the specified amount of columns of pixels from the right side of the image.
+    * This is a convenience method for trim(0,0,k,0).
+    *
+    * @param k how many columns of pixels to remove
+    * @return a new image with k columns from the right removed
+    */
+   public ImmutableImage trimRight(int k) {
+      return trim(0, 0, k, 0);
+   }
+
+   /**
+    * Removes the specified amount of rows of pixels from the bottom of the image.
+    * This is a convenience method for trim(0,0,0,k).
+    *
+    * @param k how many rows of pixels to remove
+    * @return a new image with k rows from the bottom removed
+    */
+   public ImmutableImage trimBottom(int k) {
+      return trim(0, 0, 0, k);
+   }
+
+   /**
+    * Removes the specified amount of rows of pixels from the top of the image.
+    * This is a convenience method for trim(0,k,0,0).
+    *
+    * @param k how many rows of pixels to remove
+    * @return a new image with k rows from the top removed
+    */
+   public ImmutableImage trimTop(int k) {
+      return trim(0, k, 0, 0);
+   }
+
+   public ImmutableImage underlay(ImmutableImage underlayImage) {
+      return underlay(underlayImage, 0, 0);
+   }
+
+   /**
+    * Returns a new Image that is the result of overlaying this image over the supplied image.
+    * That is, the existing image ends up being "on top" of the image parameter.
+    * The x / y parameters determine where the (0,0) coordinate of the overlay should be placed.
+    * <p>
+    * If the image to render exceeds the boundaries of the source image, then the excess
+    * pixels will be ignored.
+    *
+    * @return a new Image with the given image overlaid.
+    */
+   public ImmutableImage underlay(ImmutableImage underlayImage, int x, int y) {
+      // Per the doc: the underlay sits at the back, this sits on top, and
+      // (x, y) is where the (0, 0) of the top layer (this) gets placed.
+      // Previously both calls used (x, y), so the underlay was offset to
+      // the same position as the top layer instead of being painted at
+      // the canvas origin first. The zero-arg overload masked the bug
+      // because both reduce to (0, 0).
+      ImmutableImage target = this.blank();
+      target.overlayInPlace(underlayImage.awt(), 0, 0);
+      target.overlayInPlace(awt(), x, y);
+      return target.associateMetadata(metadata);
+   }
+
+   /**
+    * Returns this image, with metadata attached.
+    * <p>
+    * Both the original and the new image will share a buffer
+    *
+    * @return a new ImmutableImage sharing this image's buffer with the given metadata attached
+    */
+   public ImmutableImage associateMetadata(ImageMetadata metadata) {
+      return new ImmutableImage(awt(), metadata);
+   }
+
+   /**
+    * Returns a new image that is the result of scaling this image but without changing the canvas size.
+    * <p>
+    * This is a convenience method for calling zoom(factor, ScaleMethod.Bicubic).
+    *
+    * @param factor how much to zoom by
+    * @return the zoomed image
+    */
+   public ImmutableImage zoom(double factor) {
+      return zoom(factor, ScaleMethod.Bicubic);
+   }
+
+   /**
+    * Returns a new image that is the result of scaling this image but without changing the canvas size.
+    * <p>
+    * This can be thought of as zooming in on a camera - the viewpane does not change but the image increases
+    * in size with the outer columns/rows being dropped as required.
+    * <p>
+    * When zooming out (factor &lt; 1) the canvas area not covered by the scaled image is transparent,
+    * consistent with the defaults used by resizeTo, fit and pad.
+    *
+    * @param factor how much to zoom by
+    * @param method how to apply the scaling method
+    * @return the zoomed image
+    */
+   public ImmutableImage zoom(double factor, ScaleMethod method) {
+      return scale(factor, method).resizeTo(width, height, Position.Center, Colors.Transparent.awt()).associateMetadata(metadata);
+   }
+
+   /**
+    * Maps the pixels of this image into another image by applying the given function to each pixel.
+    * <p>
+    * The function accepts a pixel being transformed and returns a new (or same) color.
+    *
+    * @param mapper the function to transform pixel x,y with existing value p into new pixel value p' (p prime)
+    * @return a new Image with the mapper function applied to each pixel
+    */
+   public ImmutableImage map(Function<Pixel, Color> mapper) {
+      // Same per-pixel application as MutableImage.mapInPlace, but routed through
+      // transformPixels so the redundant full-raster copy is skipped.
+      return transformPixels((offset, p) -> mapper.apply(new Pixel(offset % width, offset / width, p)).getRGB());
+   }
+
+   /**
+    * Returns a Canvas that wraps this image.
+    *
+    * @return a new Canvas that wraps this image
+    */
+   public Canvas toCanvas() {
+      return new Canvas(this);
+   }
+
+   @Override
+   public WriteContext forWriter(ImageWriter writer) {
+      return new WriteContext(writer, this, metadata);
+   }
+
+   public ImmutableImage overlay(ImmutableImage image, Position position) {
+      ImmutableImage copy = this.copy();
+      copy.overlayInPlace(
+         image.awt(),
+         position.calculateX(copy.width, copy.height, image.width, image.height),
+         position.calculateY(copy.width, copy.height, image.width, image.height)
+      );
+      return copy;
+   }
+
+   public ImmutableImage transform(Transform transform) throws IOException {
+      return transform.apply(this);
+   }
+
+   public ImmutableImage toGrayscale(GrayscaleMethod method) {
+      // The previous map((Pixel) -> Color) routed through mapInPlace and
+      // allocated three objects per pixel: an RGBColor (toColor), a Grayscale
+      // (method.toGrayscale), and a java.awt.Color (.awt()) — plus a Pixel
+      // wrapper inside mapInPlace. Via transformPixels only the RGBColor +
+      // Grayscale allocations remain (GrayscaleMethod's interface requires
+      // a Color in / Grayscale out), and the redundant raster copy is skipped.
+      return transformPixels((offset, p) -> {
+         int r = (p >> 16) & 0xFF;
+         int g = (p >> 8) & 0xFF;
+         int b = p & 0xFF;
+         int a = (p >>> 24) & 0xFF;
+         Grayscale gray = method.toGrayscale(new RGBColor(r, g, b, a));
+         return (gray.alpha << 24) | (gray.gray << 16) | (gray.gray << 8) | gray.gray;
+      });
+   }
+}

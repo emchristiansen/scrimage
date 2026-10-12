@@ -1,0 +1,49 @@
+/*
+   Copyright 2013 Stephen K Samuel
+
+   Licensed under the Apache License, Version 2.0 (the "License");
+   you may not use this file except in compliance with the License.
+   You may obtain a copy of the License at
+
+       http://www.apache.org/licenses/LICENSE-2.0
+
+   Unless required by applicable law or agreed to in writing, software
+   distributed under the License is distributed on an "AS IS" BASIS,
+   WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+   See the License for the specific language governing permissions and
+   limitations under the License.
+ */
+package com.sksamuel.scrimage.filter;
+
+import java.awt.image.BufferedImageOp;
+
+public class DissolveFilter extends BufferedOpFilter {
+
+   private final float density;
+   private final float softness;
+
+   /**
+    * @param density the density in the range 0 to 1.
+    */
+   public DissolveFilter(float density) {
+      this(density, 0f);
+   }
+
+   /**
+    * @param density  the density in the range 0 to 1.
+    * @param softness the softness of the dissolve in the range 0 to 1 (jhlabs default 0).
+    */
+   public DissolveFilter(float density, float softness) {
+      this.density = density;
+      this.softness = softness;
+   }
+
+   @Override
+   public BufferedImageOp op() {
+      thirdparty.jhlabs.image.DissolveFilter op = new thirdparty.jhlabs.image.DissolveFilter();
+      op.setDensity(density);
+      op.setSoftness(softness);
+      return op;
+   }
+
+}

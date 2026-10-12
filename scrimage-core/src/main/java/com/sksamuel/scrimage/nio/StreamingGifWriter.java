@@ -1,0 +1,258 @@
+package com.sksamuel.scrimage.nio;
+
+import com.sksamuel.scrimage.AwtImage;
+import com.sksamuel.scrimage.DisposeMethod;
+import com.sksamuel.scrimage.ImmutableImage;
+
+import javax.imageio.ImageWriter;
+import javax.imageio.*;
+import javax.imageio.metadata.IIOInvalidTreeException;
+import javax.imageio.metadata.IIOMetadata;
+import javax.imageio.metadata.IIOMetadataNode;
+import javax.imageio.stream.MemoryCacheImageOutputStream;
+import java.awt.image.BufferedImage;
+import java.awt.image.DataBuffer;
+import java.awt.image.DataBufferByte;
+import java.awt.image.DataBufferInt;
+import java.io.File;
+import java.io.FileOutputStream;
+import java.io.IOException;
+import java.io.OutputStream;
+import java.nio.file.Path;
+import java.nio.file.Paths;
+import java.time.Duration;
+
+import static java.awt.image.BufferedImage.TYPE_INT_ARGB;
+
+/**
+ * Baseed on work by Elliot Kroo on 2009-04-25 and adapted into Java and rewritten.
+ * <p>
+ * This work is licensed under the Creative Commons Attribution 3.0 Unported
+ * License. To view a copy of this license, visit
+ * http://creativecommons.org/licenses/by/3.0/ or send a letter to Creative
+ * Commons, 171 Second Street, Suite 300, San Francisco, California, 94105, USA.
+ * <p>
+ * Typical usage will look something like:
+ * {{{
+ * import com.sksamuel.scrimage.nio.StreamingGifWriter
+ * val stream = StreamingGifWriter()
+ * stream.prepareStream("/path/to/gif.gif", BufferedImage.TYPE_INT_ARGB)
+ * stream.writeFrame(image0)
+ * stream.writeFrame(image1)
+ * stream.writeFrame(imageN)
+ * stream.finish()
+ * }}}
+ */
+public class StreamingGifWriter extends AbstractGifWriter {
+
+   private final Duration frameDelay;
+   private final boolean infiniteLoop;
+   private final boolean compressed;
+
+   public StreamingGifWriter() {
+      this.frameDelay = Duration.ofSeconds(2);
+      this.infiniteLoop = true;
+      this.compressed = false;
+   }
+
+   public StreamingGifWriter(Duration frameDelay, boolean infiniteLoop, boolean compressed) {
+      this.frameDelay = frameDelay;
+      this.infiniteLoop = infiniteLoop;
+      this.compressed = compressed;
+   }
+
+   public StreamingGifWriter withFrameDelay(Duration delay) {
+      return new StreamingGifWriter(delay, infiniteLoop, compressed);
+   }
+
+   public StreamingGifWriter withInfiniteLoop(boolean infiniteLoop) {
+      return new StreamingGifWriter(frameDelay, infiniteLoop, compressed);
+   }
+
+   public StreamingGifWriter withCompression(boolean compressed) {
+      return new StreamingGifWriter(frameDelay, infiniteLoop, compressed);
+   }
+
+   public interface GifStream extends AutoCloseable {
+      GifStream writeFrame(ImmutableImage image) throws IOException;
+
+      GifStream writeFrame(ImmutableImage image, Duration delay) throws IOException;
+
+      GifStream writeFrame(ImmutableImage image, DisposeMethod disposeMethod) throws IOException;
+
+      GifStream writeFrame(ImmutableImage image, Duration delay, DisposeMethod disposalMethod) throws IOException;
+   }
+
+   public GifStream prepareStream(String path, int imageType) throws IOException {
+      return prepareStream(Paths.get(path), imageType);
+   }
+
+   public GifStream prepareStream(Path path, int imageType) throws IOException {
+      return prepareStream(path.toFile(), imageType);
+   }
+
+   public GifStream prepareStream(File file, int imageType) throws IOException {
+      FileOutputStream output = new FileOutputStream(file);
+      try {
+         return prepareStream(output, imageType);
+      } catch (IOException | RuntimeException e) {
+         try {
+            output.close();
+         } catch (IOException suppressed) {
+            e.addSuppressed(suppressed);
+         }
+         throw e;
+      }
+   }
+
+   public GifStream prepareStream(OutputStream output, int imageType) throws IOException {
+
+      ImageWriter writer = ImageIO.getImageWritersBySuffix("gif").next();
+      // Until the GifStream below is constructed and returned, nothing else owns
+      // the writer or the IIO stream. If any setup step throws (setFromTree can
+      // raise IIOInvalidTreeException, prepareWriteSequence can raise IOException),
+      // GifStream.close() is never reachable, so dispose/close them here.
+      MemoryCacheImageOutputStream ios = null;
+      try {
+         ImageWriteParam imageWriteParam = writer.getDefaultWriteParam();
+
+         ImageTypeSpecifier imageTypeSpecifier = ImageTypeSpecifier.createFromBufferedImageType(imageType);
+         IIOMetadata imageMetaData = writer.getDefaultImageMetadata(imageTypeSpecifier, imageWriteParam);
+
+         String metaFormatName = imageMetaData.getNativeMetadataFormatName();
+
+         IIOMetadataNode root = (IIOMetadataNode) imageMetaData.getAsTree(metaFormatName);
+         populateGraphicsControlNode(root, frameDelay);
+         populateCommentsNode(root);
+         if (infiniteLoop)
+            populateApplicationExtensions(root, infiniteLoop);
+
+         imageMetaData.setFromTree(metaFormatName, root);
+
+         ios = new MemoryCacheImageOutputStream(output);
+
+         writer.setOutput(ios);
+         writer.prepareWriteSequence(null);
+
+         return buildStream(writer, ios, imageMetaData, imageWriteParam, metaFormatName, output);
+      } catch (IOException | RuntimeException e) {
+         try {
+            writer.dispose();
+         } finally {
+            if (ios != null) ios.close();
+         }
+         throw e;
+      }
+   }
+
+   private GifStream buildStream(ImageWriter writer,
+                                 MemoryCacheImageOutputStream ios,
+                                 IIOMetadata imageMetaData,
+                                 ImageWriteParam imageWriteParam,
+                                 String metaFormatName,
+                                 OutputStream output) {
+
+      return new GifStream() {
+
+         private ImmutableImage last = null;
+
+         @Override
+         public GifStream writeFrame(ImmutableImage image) throws IOException {
+            return writeFrame(image, null, null);
+         }
+
+         @Override
+         public GifStream writeFrame(ImmutableImage image, Duration delay) throws IOException {
+            return writeFrame(image, delay, null);
+         }
+
+         @Override
+         public GifStream writeFrame(ImmutableImage image, DisposeMethod disposeMethod) throws IOException {
+            return writeFrame(image, null, disposeMethod);
+         }
+
+         @Override
+         public GifStream writeFrame(ImmutableImage image, Duration delay, DisposeMethod disposalMethod) throws IOException {
+            // All overloads funnel through here so that per-frame delay/dispose overrides and the
+            // compressed transparency-diff always compose. Previously the override overloads wrote the
+            // frame directly, which (a) leaked the overridden GraphicControlExtension attributes into
+            // every later frame (the shared imageMetaData was mutated and never restored), and (b) in
+            // compressed mode skipped the diff and the `last` snapshot update, so the next plain frame
+            // diffed against a stale image and zeroed pixels that should have been visible.
+            setGraphicControlExtensionAttributes(delay, disposalMethod);
+            if (compressed && last != null) {
+               // Copy the input so we don't mutate the caller's image when zero-filling
+               // pixels that match the previous frame (the diff step below).
+               ImmutableImage work = image.copy();
+               DataBuffer workBuffer = work.awt().getRaster().getDataBuffer();
+               DataBuffer lastBuffer = last.awt().getRaster().getDataBuffer();
+               if (workBuffer instanceof DataBufferInt && lastBuffer instanceof DataBufferInt) {
+                  int[] workData = ((DataBufferInt) workBuffer).getData();
+                  int[] lastData = ((DataBufferInt) lastBuffer).getData();
+                  int n = Math.min(workData.length, lastData.length);
+                  for (int i = 0; i < n; i++) {
+                     if (workData[i] == lastData[i]) {
+                        workData[i] = 0;
+                     }
+                  }
+               } else if (workBuffer instanceof DataBufferByte && lastBuffer instanceof DataBufferByte) {
+                  byte[] workData = ((DataBufferByte) workBuffer).getData();
+                  byte[] lastData = ((DataBufferByte) lastBuffer).getData();
+                  int n = Math.min(workData.length, lastData.length);
+                  for (int i = 0; i < n; i++) {
+                     if (workData[i] == lastData[i]) {
+                        workData[i] = 0;
+                     }
+                  }
+               } else {
+                  int size = workBuffer.getSize();
+                  for (int i = 0; i < size; i++) {
+                     if (workBuffer.getElem(i) == lastBuffer.getElem(i)) {
+                        workBuffer.setElem(i, 0);
+                     }
+                  }
+               }
+               last = image.copy();
+               writer.writeToSequence(new IIOImage(work.awt(), null, imageMetaData), imageWriteParam);
+            } else {
+               writer.writeToSequence(new IIOImage(image.awt(), null, imageMetaData), imageWriteParam);
+               last = image.copy();
+            }
+            return this;
+         }
+
+         private void setGraphicControlExtensionAttributes(Duration delay, DisposeMethod disposeMethod)
+            throws IIOInvalidTreeException {
+            // Both attributes are always written, falling back to the writer's defaults when no
+            // override is given. The shared imageMetaData instance carries the attributes of the
+            // previously written frame, so writing only the non-null overrides would let a
+            // per-frame override leak into every subsequent frame.
+            IIOMetadataNode rootOverride = (IIOMetadataNode) imageMetaData.getAsTree(metaFormatName);
+            IIOMetadataNode graphicsControlExtensionNodeOverride = getNode(rootOverride, "GraphicControlExtension");
+            Duration effectiveDelay = delay == null ? frameDelay : delay;
+            graphicsControlExtensionNodeOverride.setAttribute("delayTime", (effectiveDelay.toMillis() / 10L) + "");
+            DisposeMethod effectiveDispose = disposeMethod == null ? DisposeMethod.NONE : disposeMethod;
+            graphicsControlExtensionNodeOverride.setAttribute("disposalMethod", effectiveDispose.getDisposeMethodValue());
+            imageMetaData.setFromTree(metaFormatName, rootOverride);
+         }
+
+         @Override
+         public void close() throws IOException {
+            try {
+               writer.endWriteSequence();
+            } finally {
+               try {
+                  writer.dispose();
+               } finally {
+                  try {
+                     ios.close();
+                  } finally {
+                     output.close();
+                  }
+               }
+            }
+         }
+      };
+   }
+
+}

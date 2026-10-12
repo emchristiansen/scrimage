@@ -1,0 +1,242 @@
+package com.sksamuel.scrimage.core
+
+import com.sksamuel.scrimage.AwtImage
+import com.sksamuel.scrimage.ImmutableImage
+import com.sksamuel.scrimage.pixels.Pixel
+import java.awt.image.BufferedImage
+import io.kotest.core.spec.style.FunSpec
+import io.kotest.matchers.shouldBe
+import io.kotest.matchers.shouldNotBe
+
+class AwtImageTest : FunSpec({
+
+   // Regression tests for https://github.com/sksamuel/scrimage/pull/351
+   // k was never incremented, so every patch overwrote patches[0]
+
+   test("patches returns one entry per valid sliding-window position") {
+      val image = ImmutableImage.create(4, 4)
+      val patches = image.patches(2, 2)
+      // A 2x2 patch on a 4x4 image has valid top-left positions (0..2, 0..2),
+      // so 9 patches total. The earlier (4-2)*(4-2)=4 formula dropped the
+      // rightmost column and bottom row of patch starts.
+      patches.size shouldBe (4 - 2 + 1) * (4 - 2 + 1)
+      patches.forEach { it shouldNotBe null }
+   }
+
+   test("patches samples pixels from the correct region") {
+      // 4x4 image where each pixel's red channel equals its flat index (0..15)
+      val pixels = Array(16) { i -> Pixel(i % 4, i / 4, i, 0, 0, 255) }
+      val image = ImmutableImage.create(4, 4, pixels)
+
+      // 1x1 patches: (4-1+1)*(4-1+1) = 16; each patch contains one pixel
+      val patches = image.patches(1, 1)
+      patches.size shouldBe 16
+
+      // patch 0 → col=0, row=0 → pixel index 0 → red=0
+      patches[0][0].red() shouldBe 0
+      // patch 1 → col=1, row=0 → pixel index 1 → red=1
+      patches[1][0].red() shouldBe 1
+      // patch 4 → col=0, row=1 → pixel index 4 → red=4
+      patches[4][0].red() shouldBe 4
+      // The last patch picks up the bottom-right pixel — previously missing.
+      patches[15][0].red() shouldBe 15
+   }
+
+   // Regression: patches() previously skipped the rightmost column and
+   // bottom row of valid patch starts. A 1x1 patch should iterate every
+   // pixel in the image.
+   test("patches with patchSize 1 enumerates every pixel exactly once") {
+      val image = ImmutableImage.create(5, 3)
+      val patches = image.patches(1, 1)
+      patches.size shouldBe 5 * 3
+   }
+
+   // Regression: AwtImage.pixels() fast path for TYPE_INT_RGB read data[index] directly,
+   // but TYPE_INT_RGB stores 0x00RRGGBB (alpha bits are 0), so every pixel came back with
+   // alpha=0 (fully transparent) instead of alpha=255 (opaque).
+   test("pixels() on TYPE_INT_RGB image returns opaque pixels") {
+      val buf = java.awt.image.BufferedImage(2, 2, java.awt.image.BufferedImage.TYPE_INT_RGB)
+      buf.setRGB(0, 0, 0x00FF0000) // red
+      buf.setRGB(1, 0, 0x0000FF00) // green
+      buf.setRGB(0, 1, 0x000000FF) // blue
+      buf.setRGB(1, 1, 0x00FFFFFF) // white
+      val image = AwtImage(buf)
+      image.pixels().forEach { p -> p.alpha() shouldBe 255 }
+      image.pixels()[0].red() shouldBe 255
+      image.pixels()[1].green() shouldBe 255
+      image.pixels()[2].blue() shouldBe 255
+   }
+
+   test("AwtImage.points return array of points") {
+      val image = ImmutableImage.create(6, 4)
+      image.points().toList() shouldBe listOf(
+         java.awt.Point(0, 0),
+         java.awt.Point(1, 0),
+         java.awt.Point(2, 0),
+         java.awt.Point(3, 0),
+         java.awt.Point(4, 0),
+         java.awt.Point(5, 0),
+         java.awt.Point(0, 1),
+         java.awt.Point(1, 1),
+         java.awt.Point(2, 1),
+         java.awt.Point(3, 1),
+         java.awt.Point(4, 1),
+         java.awt.Point(5, 1),
+         java.awt.Point(0, 2),
+         java.awt.Point(1, 2),
+         java.awt.Point(2, 2),
+         java.awt.Point(3, 2),
+         java.awt.Point(4, 2),
+         java.awt.Point(5, 2),
+         java.awt.Point(0, 3),
+         java.awt.Point(1, 3),
+         java.awt.Point(2, 3),
+         java.awt.Point(3, 3),
+         java.awt.Point(4, 3),
+         java.awt.Point(5, 3)
+      )
+   }
+
+   test("pixels() returns correct non-null array for TYPE_4BYTE_ABGR image") {
+      // A BufferedImage with TYPE_4BYTE_ABGR uses a DataBufferByte, so pixels()
+      // falls through to the getRGB per-pixel path. This test locks in that
+      // contract: correct length, no nulls, coordinates in row-major order,
+      // and ARGB values preserved.
+      val bi = BufferedImage(2, 2, BufferedImage.TYPE_4BYTE_ABGR)
+      bi.setRGB(0, 0, 0xFFFF0000.toInt()) // opaque red
+      bi.setRGB(1, 0, 0xFF00FF00.toInt()) // opaque green
+      bi.setRGB(0, 1, 0xFF0000FF.toInt()) // opaque blue
+      bi.setRGB(1, 1, 0xFFFFFFFF.toInt()) // opaque white
+
+      val image = ImmutableImage.wrapAwt(bi)
+      val pixels = image.pixels()
+
+      pixels.size shouldBe 4
+      pixels.forEach { it shouldNotBe null }
+
+      pixels[0].x shouldBe 0; pixels[0].y shouldBe 0
+      pixels[0].argb shouldBe 0xFFFF0000.toInt()
+
+      pixels[1].x shouldBe 1; pixels[1].y shouldBe 0
+      pixels[1].argb shouldBe 0xFF00FF00.toInt()
+
+      pixels[2].x shouldBe 0; pixels[2].y shouldBe 1
+      pixels[2].argb shouldBe 0xFF0000FF.toInt()
+
+      pixels[3].x shouldBe 1; pixels[3].y shouldBe 1
+      pixels[3].argb shouldBe 0xFFFFFFFF.toInt()
+   }
+
+   // hashCode is now derived directly from a bulk getRGB int[] rather than
+   // a materialised Pixel[w*h]. The contract — equal images produce equal
+   // hash codes — must still hold. These tests pin that, plus a couple of
+   // useful invariants.
+   test("hashCode is consistent with equals for two structurally equal images") {
+      val pixels = Array(16) { i -> Pixel(i % 4, i / 4, 0xFF000000.toInt() or (i shl 8)) }
+      val a = ImmutableImage.create(4, 4, pixels)
+      val b = ImmutableImage.create(4, 4, pixels.copyOf())
+      a shouldBe b
+      a.hashCode() shouldBe b.hashCode()
+   }
+
+   test("hashCode distinguishes images with different dimensions") {
+      val a = ImmutableImage.create(4, 4)
+      val b = ImmutableImage.create(2, 8)
+      a.hashCode() shouldNotBe b.hashCode()
+   }
+
+   test("hashCode is stable across repeated calls") {
+      val pixels = Array(4) { i -> Pixel(i % 2, i / 2, 0xFF000000.toInt() or i) }
+      val image = ImmutableImage.create(2, 2, pixels)
+      val h = image.hashCode()
+      image.hashCode() shouldBe h
+      image.hashCode() shouldBe h
+   }
+
+   // Regression tests for the short-circuiting predicate methods (exists,
+   // forAll, count). Verifies both correctness and that the predicate
+   // short-circuits — i.e. exists() stops calling the predicate after the
+   // first match, and forAll() stops after the first non-match.
+   test("exists() returns true and short-circuits at first match") {
+      val pixels = Array(100) { i -> Pixel(i % 10, i / 10, if (i == 3) 0xFFFF0000.toInt() else 0xFF000000.toInt()) }
+      val image = ImmutableImage.create(10, 10, pixels)
+      var calls = 0
+      val matched = image.exists { p ->
+         calls++
+         p.red() == 255
+      }
+      matched shouldBe true
+      calls shouldBe 4 // pixels 0..3 examined, then short-circuit
+   }
+
+   test("exists() returns false when no pixel matches") {
+      val pixels = Array(4) { i -> Pixel(i % 2, i / 2, 0xFF000000.toInt()) }
+      val image = ImmutableImage.create(2, 2, pixels)
+      image.exists { p -> p.red() == 255 } shouldBe false
+   }
+
+   test("forAll() returns false and short-circuits at first non-match") {
+      val pixels = Array(100) { i -> Pixel(i % 10, i / 10, if (i == 5) 0xFF000000.toInt() else 0xFFFF0000.toInt()) }
+      val image = ImmutableImage.create(10, 10, pixels)
+      var calls = 0
+      val all = image.forAll { p ->
+         calls++
+         p.red() == 255
+      }
+      all shouldBe false
+      calls shouldBe 6 // pixels 0..5 examined, then short-circuit
+   }
+
+   test("forAll() returns true when every pixel matches") {
+      val pixels = Array(4) { i -> Pixel(i % 2, i / 2, 0xFFFF0000.toInt()) }
+      val image = ImmutableImage.create(2, 2, pixels)
+      image.forAll { p -> p.red() == 255 } shouldBe true
+   }
+
+   test("count(Predicate) returns the number of matching pixels") {
+      val pixels = Array(10) { i -> Pixel(i, 0, if (i % 3 == 0) 0xFFFF0000.toInt() else 0xFF000000.toInt()) }
+      val image = ImmutableImage.create(10, 1, pixels)
+      // matches at i=0,3,6,9 → 4 pixels
+      image.count { p -> p.red() == 255 } shouldBe 4L
+   }
+
+   // average() reduces pixels via Color.average's SrcOver-style alpha-aware
+   // blend (not an arithmetic mean). The following three tests lock in that
+   // semantic so future rewrites don't drift.
+   test("average() of a uniform image returns that color") {
+      val pixels = Array(16) { Pixel(it % 4, it / 4, 0xFFAA55BB.toInt()) }
+      val image = ImmutableImage.create(4, 4, pixels)
+      val avg = image.average()
+      avg.alpha shouldBe 0xFF
+      avg.red shouldBe 0xAA
+      avg.green shouldBe 0x55
+      avg.blue shouldBe 0xBB
+   }
+
+   test("average() with all fully transparent pixels returns transparent black") {
+      val pixels = Array(4) { Pixel(it % 2, it / 2, 0x00FFFFFF) }
+      val image = ImmutableImage.create(2, 2, pixels)
+      val avg = image.average()
+      avg.alpha shouldBe 0
+      avg.red shouldBe 0
+      avg.green shouldBe 0
+      avg.blue shouldBe 0
+   }
+
+   test("average() of all-opaque pixels collapses to the first pixel (SrcOver)") {
+      // SrcOver(opaque, opaque) = the first; reducing opaque pixels in
+      // sequence therefore leaves the very first pixel as the winner.
+      val pixels = arrayOf(
+         Pixel(0, 0, 0xFFAA0000.toInt()),
+         Pixel(1, 0, 0xFF00BB00.toInt()),
+         Pixel(0, 1, 0xFF0000CC.toInt()),
+         Pixel(1, 1, 0xFFFFFFFF.toInt())
+      )
+      val image = ImmutableImage.create(2, 2, pixels)
+      val avg = image.average()
+      avg.alpha shouldBe 255
+      avg.red shouldBe 0xAA
+      avg.green shouldBe 0
+      avg.blue shouldBe 0
+   }
+})

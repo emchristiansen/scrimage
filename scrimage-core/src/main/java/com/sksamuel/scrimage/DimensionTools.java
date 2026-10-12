@@ -1,0 +1,75 @@
+/*
+   Copyright 2013 Stephen K Samuel
+
+   Licensed under the Apache License, Version 2.0 (the "License");
+   you may not use this file except in compliance with the License.
+   You may obtain a copy of the License at
+
+       http://www.apache.org/licenses/LICENSE-2.0
+
+   Unless required by applicable law or agreed to in writing, software
+   distributed under the License is distributed on an "AS IS" BASIS,
+   WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+   See the License for the specific language governing permissions and
+   limitations under the License.
+ */
+
+package com.sksamuel.scrimage;
+
+import java.awt.Color;
+
+public class DimensionTools {
+
+   public static final Color BG_COLOR = java.awt.Color.WHITE;
+   public static final int SCALING_METHOD = java.awt.Image.SCALE_AREA_AVERAGING;
+
+   public static Dimension dimensionsToCover(Dimension target, Dimension source) {
+
+      double xscale = target.getX() / (double) source.getX();
+      double yscale = target.getY() / (double) source.getY();
+
+      if (xscale > yscale) {
+         return new Dimension((int) Math.ceil(source.getX() * xscale), (int) Math.ceil(source.getY() * xscale));
+      } else {
+         return new Dimension((int) Math.ceil(source.getX() * yscale), (int) Math.ceil(source.getY() * yscale));
+      }
+   }
+
+   /**
+    * Returns width and height that allow the given source width, height to fit inside the target width, height
+    * without losing aspect ratio
+    *
+    * @return the dimensions that fit the source inside the target while preserving aspect ratio
+    */
+   public static Dimension dimensionsToFit(Dimension target, Dimension source) {
+
+      // if target width/height is zero then we have no preference for that, so set it to the original value,
+      // since it cannot be any larger
+      int maxWidth;
+      if (target.getX() == 0) {
+         maxWidth = source.getX();
+      } else {
+         maxWidth = target.getX();
+      }
+
+      int maxHeight;
+      if (target.getY() == 0) {
+         maxHeight = source.getY();
+      } else {
+         maxHeight = target.getY();
+      }
+
+      // Compare with `long` arithmetic. The earlier int * int could
+      // overflow before comparison for large source images (e.g. a
+      // 60000 × 50000 source against a 60000 maxWidth produces
+      // 60000 * 50000 = 3e9, overflowing int and flipping the sign,
+      // selecting the wrong scale branch).
+      // Clamp the derived dimension to at least 1: for aspect ratios more extreme than
+      // the target's (e.g. a 1x1000 source fitted into 100x100) the division floors to 0,
+      // which is not a valid image dimension (mirrors the clamps in resizeTo*/scaleTo*).
+      if ((long) maxWidth * source.getY() < (long) maxHeight * source.getX())
+         return new Dimension(maxWidth, Math.max(1, (int) ((long) source.getY() * maxWidth / source.getX())));
+      else
+         return new Dimension(Math.max(1, (int) ((long) source.getX() * maxHeight / source.getY())), maxHeight);
+   }
+}

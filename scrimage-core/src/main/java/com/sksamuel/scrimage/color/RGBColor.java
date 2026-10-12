@@ -1,0 +1,234 @@
+package com.sksamuel.scrimage.color;
+
+import com.sksamuel.scrimage.pixels.PixelTools;
+
+/**
+ * Red/Green/Blue
+ * <p>
+ * The red, green, blue, and alpha components should be between [0,255].
+ */
+public class RGBColor implements Color {
+
+   public final int red;
+   public final int green;
+   public final int blue;
+   public final int alpha;
+
+   /**
+    * Creates an RGB with default alpha of 255.
+    */
+   public RGBColor(int red, int green, int blue) {
+      this(red, green, blue, 255);
+   }
+
+   public RGBColor(int red, int green, int blue, int alpha) {
+
+      // Validate at runtime rather than via assert (disabled by default in
+      // production JVMs). An out-of-range component would otherwise be stored
+      // unchecked and later silently wrapped by `& 0xFF` in toARGBInt() — e.g.
+      // red = 256 becomes 0 and red = -1 becomes 255 — producing a wrong colour
+      // instead of failing fast.
+      requireInRange("red", red);
+      requireInRange("green", green);
+      requireInRange("blue", blue);
+      requireInRange("alpha", alpha);
+
+      this.red = red;
+      this.green = green;
+      this.blue = blue;
+      this.alpha = alpha;
+   }
+
+   private static void requireInRange(String component, int value) {
+      if (value < 0 || value > 255)
+         throw new IllegalArgumentException(
+            "RGBColor " + component + " component must be in [0, 255] but was " + value);
+   }
+
+   public static RGBColor fromARGBInt(int argb) {
+      int alpha = PixelTools.alpha(argb);
+      int red = PixelTools.red(argb);
+      int green = PixelTools.green(argb);
+      int blue = PixelTools.blue(argb);
+      return new RGBColor(red, green, blue, alpha);
+   }
+
+   public static RGBColor fromRGBInt(int rgb) {
+      int red = PixelTools.red(rgb);
+      int green = PixelTools.green(rgb);
+      int blue = PixelTools.blue(rgb);
+      return new RGBColor(red, green, blue);
+   }
+
+   public static RGBColor fromAwt(java.awt.Color color) {
+      return new RGBColor(color.getRed(), color.getGreen(), color.getBlue(), color.getAlpha());
+   }
+
+   public static RGBColor fromRGB(int[] rgb) {
+      return new RGBColor(rgb[0], rgb[1], rgb[2]);
+   }
+
+   /**
+    * Returns as an int the value of this color.
+    * The alpha and RGB components are packed as ARGB.
+    * Use toARGBInt() for clarity.
+    *
+    * @return the packed ARGB integer value of this color
+    */
+   @Deprecated
+   public int toInt() {
+      return toARGBInt();
+   }
+
+   public int toARGBInt() {
+      return PixelTools.argb(alpha, red, green, blue);
+   }
+
+   public RGBColor toRGB() {
+      return this;
+   }
+
+   public RGBColor withRed(int r) {
+      return new RGBColor(r, green, blue, alpha);
+   }
+
+   public RGBColor withBlue(int b) {
+      return new RGBColor(red, green, b, alpha);
+   }
+
+   public RGBColor withGreen(int g) {
+      return new RGBColor(red, g, blue, alpha);
+   }
+
+   public int average() {
+      // round, rather than truncate, for consistency with LumaGrayscale and WeightedGrayscale
+      return Math.round((red + green + blue) / 3f);
+   }
+
+   public int[] toArray() {
+      return new int[]{alpha, red, green, blue};
+   }
+
+   /**
+    * Returns a conversion of this color into a CMYK color.
+    * If this colour is already a CMYK then the same instance will be returned.
+    *
+    * @return this color converted to a CMYKColor
+    */
+   public CMYKColor toCMYK() {
+      float max = Math.max(Math.max(red, green), blue) / 255f;
+      float k = 1.0f - max;
+      float a = alpha / 255f;
+      if (max > 0.0f) {
+         return new CMYKColor(1.0f - (red / 255f) / max, 1.0f - (green / 255f) / max, 1.0f - (blue / 255f) / max, k, a);
+      } else {
+         return new CMYKColor(0, 0, 0, k, a);
+      }
+   }
+
+   // credit to https://github.com/mjackson/mjijackson.github.com/blob/master/2008/02/rgb-to-hsl-and-rgb-to-hsv-color-model-conversion-algorithms-in-javascript.txt
+   @Override
+   public HSVColor toHSV() {
+
+      float r = red / 255f;
+      float g = green / 255f;
+      float b = blue / 255f;
+
+      float max = Math.max(Math.max(r, g), b);
+      float min = Math.min(Math.min(r, g), b);
+
+      float d = (max - min);
+      float s;
+      if (max == 0) {
+         s = 0;
+      } else {
+         s = d / max;
+      }
+
+      float h;
+      if (max == min) {
+         // achromatic
+         h = 0f;
+      } else {
+         float f;
+         if (max == r) {
+            f = (g - b) / d + (g < b ? 6 : 0);
+         } else if (max == g) {
+            f = (b - r) / d + 2;
+         } else {
+            f = (r - g) / d + 4;
+         }
+         h = f / 6;
+      }
+
+      return new HSVColor(h * 360f, s, max, alpha / 255f);
+   }
+
+   // credit to https://github.com/mjackson/mjijackson.github.com/blob/master/2008/02/rgb-to-hsl-and-rgb-to-hsv-color-model-conversion-algorithms-in-javascript.txt
+   public HSLColor toHSL() {
+
+      float r = red / 255f;
+      float g = green / 255f;
+      float b = blue / 255f;
+
+      float max = Math.max(Math.max(r, g), b);
+      float min = Math.min(Math.min(r, g), b);
+
+      float l = (max + min) / 2f;
+
+      float h;
+      float s;
+      if (max == min) {
+         h = 0;
+         s = 0;
+      } else {
+         float d = max - min;
+
+         if (l > 0.5) s = d / (2 - max - min);
+         else s = d / (max + min);
+
+         float f;
+         if (max == r) {
+            f = (g - b) / d + (g < b ? 6 : 0);
+         } else if (max == g) {
+            f = (b - r) / d + 2;
+         } else {
+            f = (r - g) / d + 4;
+         }
+         h = f / 6;
+      }
+
+      return new HSLColor(h * 360f, s, l, alpha / 255f);
+   }
+
+   @Override
+   public boolean equals(Object o) {
+      if (this == o) return true;
+      if (o == null || getClass() != o.getClass()) return false;
+      RGBColor rgbColor = (RGBColor) o;
+      return red == rgbColor.red &&
+         green == rgbColor.green &&
+         blue == rgbColor.blue &&
+         alpha == rgbColor.alpha;
+   }
+
+   @Override
+   public int hashCode() {
+      int result = red;
+      result = 31 * result + green;
+      result = 31 * result + blue;
+      result = 31 * result + alpha;
+      return result;
+   }
+
+   @Override
+   public String toString() {
+      final StringBuffer sb = new StringBuffer("RGBColor{");
+      sb.append("red=").append(red);
+      sb.append(", green=").append(green);
+      sb.append(", blue=").append(blue);
+      sb.append(", alpha=").append(alpha);
+      sb.append('}');
+      return sb.toString();
+   }
+}

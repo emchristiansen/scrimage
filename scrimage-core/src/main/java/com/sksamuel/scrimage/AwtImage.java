@@ -1,0 +1,846 @@
+package com.sksamuel.scrimage;
+
+import com.sksamuel.scrimage.angles.Radians;
+import com.sksamuel.scrimage.color.RGBColor;
+import com.sksamuel.scrimage.nio.ImageWriter;
+import com.sksamuel.scrimage.nio.WriteContext;
+import com.sksamuel.scrimage.pixels.Pixel;
+import com.sksamuel.scrimage.pixels.PixelTools;
+import com.sksamuel.scrimage.scaling.AwtNearestNeighbourScale;
+import com.sksamuel.scrimage.scaling.Scale;
+import com.sksamuel.scrimage.scaling.ScrimageNearestNeighbourScale;
+import com.sksamuel.scrimage.subpixel.LinearSubpixelInterpolator;
+
+import java.awt.*;
+import java.awt.image.BufferedImage;
+import java.awt.image.ColorModel;
+import java.awt.image.DataBuffer;
+import java.awt.image.DataBufferInt;
+import java.awt.image.IndexColorModel;
+import java.io.ByteArrayInputStream;
+import java.io.File;
+import java.io.IOException;
+import java.nio.file.Path;
+import java.nio.file.Paths;
+import java.util.Arrays;
+import java.util.Iterator;
+import java.util.Set;
+import java.util.function.Consumer;
+import java.util.function.Predicate;
+import java.util.stream.Collectors;
+
+/**
+ * Wraps an AWT BufferedImage with some basic helper functions related to sizes, pixels etc.
+ * <p>
+ * It also includes methods to write out the image.
+ * <p>
+ * None of the operations in this class will mutate the underlying awt buffer.
+ */
+public class AwtImage {
+
+   private final BufferedImage awt;
+   public final int width;
+   public final int height;
+
+   public AwtImage(BufferedImage awt) {
+      assert awt != null;
+      this.awt = awt;
+      width = awt.getWidth();
+      height = awt.getHeight();
+   }
+
+   public ImmutableImage toImmutableImage() {
+      return ImmutableImage.wrapAwt(awt);
+   }
+
+   /**
+    * Returns the [BufferedImage] that this Image is wrapping.
+    *
+    * @return the wrapped BufferedImage
+    */
+   public BufferedImage awt() {
+      return awt;
+   }
+
+   /**
+    * The centre coordinates for the image.
+    *
+    * @return the centre point of the image
+    */
+   public Point center() {
+      return new Point(width / 2, height / 2);
+   }
+
+   public int centreX() {
+      return center().x;
+   }
+
+   public int centreY() {
+      return center().y;
+   }
+
+   /**
+    * The radius of the image defined as the centre to the corners.
+    *
+    * @return the radius of the image in pixels
+    */
+   public int radius() {
+      return (int) Math.sqrt(Math.pow(width / 2.0, 2) + Math.pow(height / 2.0, 2));
+   }
+
+   public Dimension dimensions() {
+      return new Dimension(width, height);
+   }
+
+   /**
+    * @return Returns the aspect ratio for this image.
+    */
+   public double ratio() {
+      if (height == 0) return 0;
+      else return width / (double) height;
+   }
+
+   /**
+    * Returns the AWT type of this image.
+    *
+    * @return the AWT image type
+    */
+   public int getType() {
+      return awt().getType();
+   }
+
+   /**
+    * Returns the colors of this image represented as an array of RGBColor.
+    *
+    * @return an array of the image's colors as RGBColor
+    */
+   public RGBColor[] colors() {
+      int[] argb = awt().getRGB(0, 0, width, height, null, 0, width);
+      RGBColor[] colors = new RGBColor[argb.length];
+      for (int i = 0; i < argb.length; i++) {
+         colors[i] = RGBColor.fromARGBInt(argb[i]);
+      }
+      return colors;
+   }
+
+   /**
+    * Returns the pixels of this image represented as an array of Pixels.
+    *
+    * @return an array of the image's pixels
+    */
+   public Pixel[] pixels() {
+      DataBuffer buffer = awt().getRaster().getDataBuffer();
+      if (buffer instanceof DataBufferInt) {
+         DataBufferInt intbuffer = (DataBufferInt) buffer;
+         int[] data = intbuffer.getData();
+         int index = 0;
+         Pixel[] pixels = new Pixel[data.length];
+         if (awt().getType() == BufferedImage.TYPE_INT_ARGB) {
+            while (index < data.length) {
+               pixels[index] = new Pixel(index % width, index / width, data[index]);
+               index++;
+            }
+         } else if (awt().getType() == BufferedImage.TYPE_INT_RGB) {
+            while (index < data.length) {
+               pixels[index] = new Pixel(index % width, index / width, data[index] | 0xFF000000);
+               index++;
+            }
+         } else {
+            throw new RuntimeException("Unsupported image type " + awt().getType());
+         }
+         return pixels;
+      } else {
+         Pixel[] pixels = new Pixel[count()];
+         int index = 0;
+         for (int y = 0; y < height; y++) {
+            for (int x = 0; x < width; x++) {
+               pixels[index++] = new Pixel(x, y, awt().getRGB(x, y));
+            }
+         }
+         return pixels;
+      }
+   }
+
+   /**
+    * Returns the pixels of the image as an iterator.
+    * <p>
+    * The iterator fetches the full pixel grid in a single bulk getRGB call on the first
+    * call to next() and then walks the buffer.
+    *
+    * @return the iterator
+    */
+   public Iterator<Pixel> iterator() {
+      return new Iterator<Pixel>() {
+
+         private int k = 0;
+         private int[] argb;
+
+         @Override
+         public boolean hasNext() {
+            return k < AwtImage.this.count();
+         }
+
+         @Override
+         public Pixel next() {
+            if (!hasNext()) throw new java.util.NoSuchElementException();
+            if (argb == null) {
+               argb = awt.getRGB(0, 0, width, height, null, 0, width);
+            }
+            int x = k % width;
+            int y = k / width;
+            return new Pixel(x, y, argb[k++]);
+         }
+      };
+   }
+
+   // Retained for source compatibility with anything outside the project that
+   // might construct an ImageState; not used by hashCode any more.
+   private ImageState imageState() {
+      return new ImageState(width, height, pixels());
+   }
+
+   /**
+    * Returns the pixel at the given coordinates.
+    *
+    * @param x the x coordinate of the pixel to grab
+    * @param y the y coordinate of the pixel to grab
+    * @return the Pixel at the location
+    */
+   public Pixel pixel(int x, int y) {
+      try {
+         int color = awt.getRGB(x, y);
+         return new Pixel(x, y, color);
+      } catch (ArrayIndexOutOfBoundsException e) {
+         throw new RuntimeException("Coord (" + x + ", " + y + ") is out of bounds; size is (" + width + "," + height + ")");
+      }
+   }
+
+   /**
+    * Returns the pixel at the given coordinate.
+    *
+    * @param p the pixel as an integer tuple
+    * @return the pixel
+    */
+   public Pixel pixel(Point p) {
+      return pixel(p.x, p.y);
+   }
+
+   /**
+    * Returns an array of every point in the image, useful if you want to be able to
+    * iterate over all the coordinates.
+    * <p>
+    * If you want the actual pixel values of every point then use pixels().
+    *
+    * @return an array of every point in the image
+    */
+   public Point[] points() {
+      Point[] points = new Point[width * height];
+      int k = 0;
+      for (int y = 0; y < height; y++) {
+         for (int x = 0; x < width; x++) {
+            points[k++] = new Point(x, y);
+         }
+      }
+      return points;
+   }
+
+   /**
+    * Returns the number of pixels in the image.
+    *
+    * @return the number of pixels
+    */
+   public int count() {
+      return width * height;
+   }
+
+   /**
+    * Executes the given side effecting function on each pixel.
+    *
+    * @param fn a function that accepts a pixel
+    */
+   public void forEach(Consumer<Pixel> fn) {
+      int[] argb = awt().getRGB(0, 0, width, height, null, 0, width);
+      int i = 0;
+      for (int y = 0; y < height; y++) {
+         for (int x = 0; x < width; x++) {
+            fn.accept(new Pixel(x, y, argb[i++]));
+         }
+      }
+   }
+
+   /**
+    * @return the pixels in the row identified by the y coordinate. 0 indexed.
+    */
+   public Pixel[] row(int y) {
+      return pixels(0, y, width, 1);
+   }
+
+   /**
+    * Returns an array of rows, where each row is itself an array of pixels in that row.
+    *
+    * @return an array of rows, each an array of pixels
+    */
+   public Pixel[][] rows() {
+      int[] argb = awt().getRGB(0, 0, width, height, null, 0, width);
+      Pixel[][] pixels = new Pixel[height][width];
+      int i = 0;
+      for (int y = 0; y < height; y++) {
+         for (int x = 0; x < width; x++) {
+            pixels[y][x] = new Pixel(x, y, argb[i++]);
+         }
+      }
+      return pixels;
+   }
+
+   /**
+    * @return the pixels for the column identified by the x co-ordinate. 0 indexed.
+    */
+   public Pixel[] col(int x) {
+      return pixels(x, 0, 1, height);
+   }
+
+   /**
+    * Returns true if a pixel with the given color exists
+    *
+    * @param color the pixel colour to look for.
+    * @return true if there exists at least one pixel that has the given pixels color
+    */
+   public boolean contains(Color color) {
+      int target = color.getRGB();
+      int[] argb = awt().getRGB(0, 0, width, height, null, 0, width);
+      for (int v : argb) {
+         if (v == target) return true;
+      }
+      return false;
+   }
+
+   /**
+    * Returns true if the predicate is true for at least one pixel on the image.
+    *
+    * @param p a predicate
+    * @return true if p holds for at least one pixel
+    */
+   public boolean exists(Predicate<Pixel> p) {
+      int[] argb = awt().getRGB(0, 0, width, height, null, 0, width);
+      int i = 0;
+      for (int y = 0; y < height; y++) {
+         for (int x = 0; x < width; x++) {
+            if (p.test(new Pixel(x, y, argb[i++]))) return true;
+         }
+      }
+      return false;
+   }
+
+   /**
+    * Returns the color at the given coordinates.
+    *
+    * @return the RGBColor value at the coords
+    */
+   public RGBColor color(int x, int y) {
+      return pixel(x, y).toColor();
+   }
+
+   /**
+    * Returns the ARGB components for the pixel at the given coordinates
+    *
+    * @param x the x coordinate of the pixel component to grab
+    * @param y the y coordinate of the pixel component to grab
+    * @return an array containing ARGB components in that order.
+    */
+   public int[] argb(int x, int y) {
+      Pixel p = pixel(x, y);
+      return new int[]{p.alpha(), p.red(), p.green(), p.blue()};
+   }
+
+   /**
+    * Returns the ARGB components for all pixels in this image
+    *
+    * @return an array containing an array for each ARGB components in that order.
+    */
+   public int[][] argb() {
+      int[] packed = awt().getRGB(0, 0, width, height, null, 0, width);
+      int[][] result = new int[packed.length][];
+      for (int i = 0; i < packed.length; i++) {
+         int p = packed[i];
+         result[i] = new int[]{(p >> 24) & 0xFF, (p >> 16) & 0xFF, (p >> 8) & 0xFF, p & 0xFF};
+      }
+      return result;
+   }
+
+   /**
+    * Returns the ARGB components for all pixels in this image as packed ints.
+    *
+    * @return an array containing the packed ARGB int for each pixel.
+    */
+   public int[] argbints() {
+      return awt().getRGB(0, 0, width, height, null, 0, width);
+   }
+
+   public int[] rgb(int x, int y) {
+      Pixel p = pixel(x, y);
+      return new int[]{p.red(), p.green(), p.blue()};
+   }
+
+   public int[][] rgb() {
+      int[] packed = awt().getRGB(0, 0, width, height, null, 0, width);
+      int[][] result = new int[packed.length][];
+      for (int i = 0; i < packed.length; i++) {
+         int p = packed[i];
+         result[i] = new int[]{(p >> 16) & 0xFF, (p >> 8) & 0xFF, p & 0xFF};
+      }
+      return result;
+   }
+
+   /**
+    * Returns a rectangular region within the given boundaries as a single
+    * dimensional array of Pixels.
+    * <p>
+    * Eg, pixels(10, 10, 30, 20) would result in an array of size 600 with
+    * the first row of the region in indexes 0,..,29, second row 30,..,59 etc.
+    *
+    * @param x the start x coordinate
+    * @param y the start y coordinate
+    * @param w the width of the region
+    * @param h the height of the region
+    * @return an Array of pixels for the region
+    */
+   public Pixel[] pixels(int x, int y, int w, int h) {
+      int[] argb = awt().getRGB(x, y, w, h, null, 0, w);
+      Pixel[] pixels = new Pixel[w * h];
+      int k = 0;
+      for (int dy = 0; dy < h; dy++) {
+         for (int dx = 0; dx < w; dx++) {
+            pixels[k] = new Pixel(x + dx, y + dy, argb[k]);
+            k++;
+         }
+      }
+      return pixels;
+   }
+
+   public Pixel[] patch(int x, int y, int patchWidth, int patchHeight) {
+      if (x < 0 || y < 0 || patchWidth < 0 || patchHeight < 0
+            || x + patchWidth > width || y + patchHeight > height) {
+         throw new IllegalArgumentException(
+            "Patch (" + x + "," + y + " " + patchWidth + "x" + patchHeight + ") falls outside image bounds " + width + "x" + height);
+      }
+      return patchFrom(pixels(), x, y, patchWidth, patchHeight);
+   }
+
+   // Internal helper, callers (this::patch, this::patches) are responsible
+   // for staying inside [0, width] × [0, height]. arraycopy below copies
+   // patchWidth contiguous Pixels per row from a row-major flat array, so
+   // an out-of-range x or width would silently span row boundaries.
+   private Pixel[] patchFrom(Pixel[] source, int x, int y, int patchWidth, int patchHeight) {
+      Pixel[] patch = new Pixel[patchWidth * patchHeight];
+      for (int i = 0; i < patchHeight; i++) {
+         System.arraycopy(source, offset(x, y + i), patch, i * patchWidth, patchWidth);
+      }
+      return patch;
+   }
+
+   @Override
+   public String toString() {
+      return "Image [width=" + width + ", height=" + height + ", type=" + awt.getType() + "]";
+   }
+
+   /**
+    * Uses linear interpolation to get a sub-pixel.
+    * <p>
+    * Legal values for `x` and `y` are in [0, width) and [0, height),
+    * respectively.
+    *
+    * @return the interpolated sub-pixel as a packed ARGB int
+    */
+   public int subpixel(double x, double y) {
+      return new LinearSubpixelInterpolator(this).subpixel(x, y);
+   }
+
+   /**
+    * Returns all the patches of a given size in the image, assuming pixel
+    * alignment (no subpixel extraction).
+    * <p>
+    * The patches are returned as an array of of pixel matrices arrays.
+    *
+    * @return an array of patches, each an array of pixels
+    */
+   public Pixel[][] patches(int patchWidth, int patchHeight) {
+      // Sliding-window enumeration: a patch starting at (col, row) is valid
+      // when col + patchWidth <= width and row + patchHeight <= height,
+      // giving (width - patchWidth + 1) * (height - patchHeight + 1) patches.
+      // The previous formula dropped the rightmost column and bottom row of
+      // patch starts (e.g. patches(1, 1) on a 4x4 image returned 9 patches
+      // instead of 16).
+      int rows = height - patchHeight + 1;
+      int cols = width - patchWidth + 1;
+      Pixel[][] patches = new Pixel[rows * cols][];
+      Pixel[] source = pixels();
+      int k = 0;
+      for (int row = 0; row < rows; row++) {
+         for (int col = 0; col < cols; col++) {
+            patches[k] = patchFrom(source, col, row, patchWidth, patchHeight);
+            k++;
+         }
+      }
+      return patches;
+   }
+
+   public int offset(int x, int y) {
+      return PixelTools.coordsToOffset(x, y, width);
+   }
+
+   /**
+    * Returns a set of the distinct colours used in this image.
+    *
+    * @return the set of distinct Colors
+    */
+   public Set<RGBColor> colours() {
+      // Dedupe the packed ints first so RGBColor is only allocated once per
+      // distinct colour, rather than once per pixel.
+      int[] argb = argbints();
+      return Arrays.stream(argb).distinct().mapToObj(RGBColor::fromARGBInt).collect(Collectors.toSet());
+   }
+
+   /**
+    * Counts the number of pixels with the given colour.
+    *
+    * @param color the colour to detect.
+    * @return the number of pixels that matched the colour of the given pixel
+    */
+   public long count(Color color) {
+      int target = color.getRGB();
+      int[] argb = awt().getRGB(0, 0, width, height, null, 0, width);
+      long n = 0;
+      for (int v : argb) {
+         if (v == target) n++;
+      }
+      return n;
+   }
+
+   /**
+    * Counts the number of pixels that are true for the given predicate
+    *
+    * @param p a predicate
+    * @return the number of pixels that evaluated true
+    */
+   public long count(Predicate<Pixel> p) {
+      int[] argb = awt().getRGB(0, 0, width, height, null, 0, width);
+      long n = 0;
+      int i = 0;
+      for (int y = 0; y < height; y++) {
+         for (int x = 0; x < width; x++) {
+            if (p.test(new Pixel(x, y, argb[i++]))) n++;
+         }
+      }
+      return n;
+   }
+
+   /**
+    * Returns a new AWT BufferedImage from this image.
+    *
+    * @param type the type of buffered image to create, if not specified then defaults to the current image type
+    * @return a new, non-shared, BufferedImage with the same data as this Image.
+    */
+   public BufferedImage toNewBufferedImage(int type) {
+      if (awt.getType() == type) {
+         // Same type — copy the raster data directly. Going through
+         // Graphics2D.drawImage would composite via SrcOver, which
+         // premultiplies alpha and rounds away ±1 from each colour channel
+         // when alpha doesn't divide 255 cleanly.
+         BufferedImage target = sameTypeCopyTarget(type);
+         awt.copyData(target.getRaster());
+         return target;
+      } else {
+         // Type conversion — Graphics2D handles the colour-space conversion.
+         BufferedImage target = new BufferedImage(width, height, type);
+         Graphics2D g2 = (Graphics2D) target.getGraphics();
+         try {
+            g2.drawImage(awt, 0, 0, null);
+         } finally {
+            g2.dispose();
+         }
+         return target;
+      }
+   }
+
+   /**
+    * Creates the target for a same-type raster copy. For palette-based types
+    * (TYPE_BYTE_INDEXED, TYPE_BYTE_BINARY) the target must reuse the source's own
+    * IndexColorModel: new BufferedImage(width, height, type) would get the *default*
+    * palette, and copyData copies raw palette indices, so every pixel would be
+    * remapped through the wrong palette.
+    */
+   private BufferedImage sameTypeCopyTarget(int type) {
+      ColorModel cm = awt.getColorModel();
+      if (cm instanceof IndexColorModel) {
+         return new BufferedImage(cm, cm.createCompatibleWritableRaster(width, height), cm.isAlphaPremultiplied(), null);
+      }
+      return new BufferedImage(width, height, type);
+   }
+
+   /**
+    * Returns a new AWTImage with the same dimensions and same AWT type.
+    * The data is uninitialized.
+    * <p>
+    * If the source has BufferedImage.TYPE_CUSTOM (type 0) — which can't be
+    * fed back into the BufferedImage(width, height, type) constructor —
+    * falls back to TYPE_INT_ARGB, matching ImmutableImage.fromAwt's policy.
+    *
+    * @return a new uninitialized AwtImage with the same dimensions
+    */
+   public AwtImage empty() {
+      int type = awt.getType();
+      if (type == 0) type = BufferedImage.TYPE_INT_ARGB;
+      return new AwtImage(new BufferedImage(width, height, type));
+   }
+
+   @Override
+   public int hashCode() {
+      // Hash from a single bulk getRGB int[] rather than materialising a
+      // Pixel[w*h] (which the old imageState() route allocated and then
+      // hashed object-by-object). Consistent with equals() which compares
+      // the same bulk getRGB int[]s — equal images still produce equal
+      // hash codes.
+      int[] argb = awt().getRGB(0, 0, width, height, null, 0, width);
+      int result = 31 * width + height;
+      return 31 * result + Arrays.hashCode(argb);
+   }
+
+   @Override
+   public boolean equals(Object other) {
+      if (other instanceof AwtImage) {
+         AwtImage that = (AwtImage) other;
+         if (this.width != that.width || this.height != that.height) return false;
+         int[] a = this.awt().getRGB(0, 0, width, height, null, 0, width);
+         int[] b = that.awt().getRGB(0, 0, that.width, that.height, null, 0, that.width);
+         return Arrays.equals(a, b);
+      }
+      return false;
+   }
+
+   protected BufferedImage scale(int targetWidth, int targetHeight, Scale scale) {
+      return scale.scale(awt, targetWidth, targetHeight);
+   }
+
+   protected BufferedImage fastScaleScrimage(int targetWidth, int targetHeight) {
+      return scale(targetWidth, targetHeight, new ScrimageNearestNeighbourScale());
+   }
+
+   /**
+    * Returns a new AWT BufferedImage scaled using nearest-neighbour.
+    *
+    * @return a new scaled BufferedImage
+    */
+   protected BufferedImage fastScaleAwt(int targetWidth, int targetHeight) {
+      return scale(targetWidth, targetHeight, new AwtNearestNeighbourScale());
+   }
+
+   /**
+    * Returns a new AWT Image rotated with the given angle (in radians)
+    *
+    * @return a new rotated BufferedImage
+    */
+   protected BufferedImage rotateByRadians(Radians angle, Color bgcolor) {
+
+      double sin = Math.abs(Math.sin(angle.value)),
+         cos = Math.abs(Math.cos(angle.value));
+
+      int neww = (int) Math.floor(width * cos + height * sin),
+         newh = (int) Math.floor(height * cos + width * sin);
+
+      // TYPE_CUSTOM (0) cannot be passed to the BufferedImage constructor;
+      // fall back to ARGB like blank()/empty()/fromAwt() do.
+      int type = getType() == BufferedImage.TYPE_CUSTOM ? BufferedImage.TYPE_INT_ARGB : getType();
+      BufferedImage rotated = ImmutableImage.filled(neww, newh, bgcolor, type).awt();
+      Graphics2D graphic = rotated.createGraphics();
+      try {
+         graphic.translate((neww - width) / 2.0, (newh - height) / 2.0);
+         graphic.rotate(angle.value, width / 2.0, height / 2.0);
+         graphic.drawRenderedImage(awt, null);
+      } finally {
+         graphic.dispose();
+      }
+      return rotated;
+   }
+
+   /**
+    * Returns true if the given predicate holds for all pixels in the image.
+    *
+    * @return true if the predicate holds for every pixel
+    */
+   public boolean forAll(Predicate<Pixel> predicate) {
+      int[] argb = awt().getRGB(0, 0, width, height, null, 0, width);
+      int i = 0;
+      for (int y = 0; y < height; y++) {
+         for (int x = 0; x < width; x++) {
+            if (!predicate.test(new Pixel(x, y, argb[i++]))) return false;
+         }
+      }
+      return true;
+   }
+
+   /**
+    * Programatically returns the origin point of top left.
+    *
+    * @return the pixel at the top left of the image
+    */
+   public Pixel topLeftPixel() {
+      return pixel(0, 0);
+   }
+
+   public Pixel bottomLeftPixel() {
+      return pixel(0, height - 1);
+   }
+
+   public Pixel topRightPixel() {
+      return pixel(width - 1, 0);
+   }
+
+   public Pixel bottomRightPixel() {
+      return pixel(width - 1, height - 1);
+   }
+
+   /**
+    * Returns true if this image supports transparency/alpha in its underlying data model.
+    *
+    * @return true if the image supports alpha
+    */
+   public boolean hasAlpha() {
+      return awt().getColorModel().hasAlpha();
+   }
+
+   /**
+    * Returns true if this image supports transparency/alpha in its underlying data model.
+    *
+    * @return true if the image supports alpha
+    */
+   @Deprecated()
+   public boolean hasTransparency() {
+      return hasAlpha();
+   }
+
+   /**
+    * Reduces all pixels in this image to a single colour by folding them with
+    * {@link com.sksamuel.scrimage.color.Color#average(com.sksamuel.scrimage.color.Color)},
+    * i.e. a left-to-right SrcOver alpha blend in row-major order — not an arithmetic
+    * mean of the channels. As a consequence, a fully opaque image collapses to the
+    * colour of its first (top-left) pixel, since SrcOver of two opaque colours yields
+    * the source.
+    *
+    * @return the SrcOver-blend reduction of every pixel in the image
+    */
+   public RGBColor average() {
+      int[] argb = awt().getRGB(0, 0, width, height, null, 0, width);
+      // Sequential SrcOver-blend reduce, mirroring Color.average(Color other).
+      // We carry running int channel values through the loop, avoiding an
+      // RGBColor allocation per pixel that the previous Stream-based reduce
+      // had to make.
+      int p0 = argb[0];
+      int accA = (p0 >>> 24) & 0xFF;
+      int accR = (p0 >> 16) & 0xFF;
+      int accG = (p0 >> 8) & 0xFF;
+      int accB = p0 & 0xFF;
+      for (int i = 1; i < argb.length; i++) {
+         int p = argb[i];
+         int pa = (p >>> 24) & 0xFF;
+         int pr = (p >> 16) & 0xFF;
+         int pg = (p >> 8) & 0xFF;
+         int pb = p & 0xFF;
+         double a1 = accA / 255.0;
+         double a2 = pa / 255.0;
+         double aOut = a1 + a2 * (1.0 - a1);
+         if (aOut == 0.0) {
+            accA = 0; accR = 0; accG = 0; accB = 0;
+         } else {
+            accR = (int) Math.round((accR * a1 + pr * a2 * (1.0 - a1)) / aOut);
+            accG = (int) Math.round((accG * a1 + pg * a2 * (1.0 - a1)) / aOut);
+            accB = (int) Math.round((accB * a1 + pb * a2 * (1.0 - a1)) / aOut);
+            accA = (int) Math.round(aOut * 255);
+         }
+      }
+      return new RGBColor(accR, accG, accB, accA);
+   }
+
+   /**
+    * Returns the per-channel distribution of pixel values across this image.
+    *
+    * @return a {@link Histogram} describing this image.
+    */
+   public Histogram histogram() {
+      return new Histogram(this);
+   }
+
+   /**
+    * Returns true if all the pixels on this image are a single color.
+    *
+    * @param color the color to test pixels against
+    * @return true if every pixel matches the given color
+    */
+   public boolean isFilled(Color color) {
+      int target = color.getRGB();
+      int[] argb = awt().getRGB(0, 0, width, height, null, 0, width);
+      for (int v : argb) {
+         if (v != target) return false;
+      }
+      return true;
+   }
+
+   public Path output(ImageWriter writer, String path) throws IOException {
+      return forWriter(writer).write(Paths.get(path));
+   }
+
+   public File output(ImageWriter writer, File file) throws IOException {
+      return forWriter(writer).write(file);
+   }
+
+   public Path output(ImageWriter writer, Path path) throws IOException {
+      return forWriter(writer).write(path);
+   }
+
+   public byte[] bytes(ImageWriter writer) throws IOException {
+      return forWriter(writer).bytes();
+   }
+
+   public WriteContext forWriter(ImageWriter writer) {
+      return new WriteContext(writer, this, null);
+   }
+
+   /**
+    * Returns a byte array stream consisting of the pixels of this image written out using
+    * the supplied writer.
+    *
+    * @deprecated pointless method that simply wraps bytes()
+    * @return a stream of the image's bytes written by the given writer
+    */
+   @Deprecated
+   public ByteArrayInputStream stream(ImageWriter writer) throws IOException {
+      return forWriter(writer).stream();
+   }
+
+   /**
+    * Returns a copy of this image with the backing image type set to the given value.
+    *
+    * @return a copy of this image with the given backing type
+    */
+   public AwtImage clone(int imageType) {
+      if (imageType <= 0) throw new IllegalArgumentException("Image type must be > 0");
+      if (awt.getType() == imageType) {
+         // Same type — copy the raster data directly. Going through
+         // Graphics2D.drawImage would composite via SrcOver, which
+         // premultiplies alpha and rounds away ±1 from each colour channel
+         // when alpha doesn't divide 255 cleanly.
+         BufferedImage target = sameTypeCopyTarget(imageType);
+         awt.copyData(target.getRaster());
+         return new AwtImage(target);
+      } else {
+         // Type conversion — Graphics2D handles the colour-space conversion.
+         BufferedImage target = new BufferedImage(awt.getWidth(null), awt.getHeight(null), imageType);
+         Graphics g2 = target.getGraphics();
+         try {
+            g2.drawImage(awt, 0, 0, null);
+         } finally {
+            g2.dispose();
+         }
+         return new AwtImage(target);
+      }
+   }
+}

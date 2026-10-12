@@ -1,0 +1,158 @@
+package com.sksamuel.scrimage;
+
+import com.sksamuel.scrimage.color.RGBColor;
+import com.sksamuel.scrimage.pixels.Pixel;
+import com.sksamuel.scrimage.pixels.PixelTools;
+
+import java.awt.*;
+import java.awt.image.BufferedImage;
+import java.awt.image.DataBuffer;
+import java.awt.image.DataBufferInt;
+import java.awt.image.IndexColorModel;
+import java.awt.image.RescaleOp;
+import java.awt.image.WritableRaster;
+import java.util.Arrays;
+import java.util.function.Function;
+
+/**
+ * Extends [AwtImage] with methods that operate on a [BufferedImage] by mutating the buffer.
+ * All methods in this class should return void as they operate on the underlying image in place.
+ * <p>
+ * This class cannot contain methods that result in a changed canvas size, as there is no
+ * way to mutate the size of a raster once created.
+ */
+public class MutableImage extends AwtImage {
+
+   public MutableImage(BufferedImage awt) {
+      super(awt);
+   }
+
+   /**
+    * Maps the pixels of this image into another image by applying the given function to each pixel.
+    * <p>
+    * The function accepts three parameters: x,y,p where x and y are the coordinates of the pixel
+    * being transformed and p is the pixel at that location.
+    *
+    * @param mapper the function to transform pixel x,y with existing value p into new pixel value p' (p prime)
+    */
+   public void mapInPlace(Function<Pixel, Color> mapper) {
+      int[] argb = awt().getRGB(0, 0, width, height, null, 0, width);
+      int i = 0;
+      for (int y = 0; y < height; y++) {
+         for (int x = 0; x < width; x++) {
+            argb[i] = mapper.apply(new Pixel(x, y, argb[i])).getRGB();
+            i++;
+         }
+      }
+      awt().setRGB(0, 0, width, height, argb, 0, width);
+   }
+
+   public void replaceTransparencyInPlace(java.awt.Color color) {
+      int[] argb = awt().getRGB(0, 0, width, height, null, 0, width);
+      int cr = color.getRed(), cg = color.getGreen(), cb = color.getBlue(), ca = color.getAlpha();
+      for (int i = 0; i < argb.length; i++) {
+         argb[i] = PixelTools.replaceTransparencyWithColor(argb[i], cr, cg, cb, ca);
+      }
+      awt().setRGB(0, 0, width, height, argb, 0, width);
+   }
+
+   /**
+    * Fills all pixels the given color on the existing image.
+    */
+   public void fillInPlace(Color color) {
+      int target = RGBColor.fromAwt(color).toARGBInt();
+      WritableRaster raster = awt().getRaster();
+      DataBuffer buffer = raster.getDataBuffer();
+      if (buffer instanceof DataBufferInt) {
+         DataBufferInt intbuffer = (DataBufferInt) buffer;
+         int[] data = intbuffer.getData();
+         // Arrays.fill on the backing array is only valid when the raster maps
+         // 1:1 onto the buffer. A sub-image view (BufferedImage.getSubimage)
+         // shares the parent's buffer with a translated origin and the parent's
+         // scanline stride, so filling the whole array would corrupt parent
+         // pixels outside the view.
+         boolean mapsOneToOne = raster.getSampleModelTranslateX() == 0
+            && raster.getSampleModelTranslateY() == 0
+            && intbuffer.getOffset() == 0
+            && data.length == width * height;
+         if (mapsOneToOne) {
+            Object colorElements = awt().getColorModel().getDataElements(target, null);
+            if (colorElements instanceof int[] && ((int[]) colorElements).length == 1) {
+               Arrays.fill(data, ((int[]) colorElements)[0]);
+               return;
+            }
+         }
+      }
+      // Generic fallback: build the packed-ARGB row once and bulk setRGB it.
+      // setRGB goes through the color model so it works for any image type
+      // (DataBufferByte, indexed, custom rasters, ...). Far cheaper than
+      // raster.setDataElements per pixel.
+      int[] argb = new int[width * height];
+      Arrays.fill(argb, target);
+      awt().setRGB(0, 0, width, height, argb, 0, width);
+   }
+
+   /**
+    * Applies the given image over the current buffer.
+    */
+   public void overlayInPlace(BufferedImage overlay, int x, int y) {
+      Graphics2D g2 = (Graphics2D) awt().getGraphics();
+      try {
+         g2.drawImage(overlay, x, y, null);
+      } finally {
+         g2.dispose();
+      }
+   }
+
+   public void setColor(int offset, com.sksamuel.scrimage.color.Color color) {
+      int x = offset % width;
+      int y = offset / width;
+      awt().setRGB(x, y, color.toRGB().toARGBInt());
+   }
+
+   public void setColor(int x, int y, com.sksamuel.scrimage.color.Color color) {
+      awt().setRGB(x, y, color.toRGB().toARGBInt());
+   }
+
+   public void setPixel(Pixel pixel) {
+      awt().setRGB(pixel.x, pixel.y, pixel.toARGBInt());
+   }
+
+   /**
+    * Mutates this image by scaling all pixel values by the given factor (brightness in other words).
+    */
+   public void rescaleInPlace(double factor) {
+      if (awt().getColorModel() instanceof IndexColorModel) {
+         // RescaleOp rejects palette-based images ("Rescaling cannot be performed on an
+         // indexed image"), and GIFs / PNG-8s load as TYPE_BYTE_INDEXED by default.
+         // Scale the unpacked ARGB values instead, like contrastInPlace; setRGB maps each
+         // result back to the nearest palette entry. Alpha is left untouched, matching
+         // RescaleOp's single-factor behavior.
+         int[] argb = awt().getRGB(0, 0, width, height, null, 0, width);
+         for (int i = 0; i < argb.length; i++) {
+            int p = argb[i];
+            int r = PixelTools.truncate(factor * PixelTools.red(p));
+            int g = PixelTools.truncate(factor * PixelTools.green(p));
+            int b = PixelTools.truncate(factor * PixelTools.blue(p));
+            argb[i] = PixelTools.argb(PixelTools.alpha(p), r, g, b);
+         }
+         awt().setRGB(0, 0, width, height, argb, 0, width);
+         return;
+      }
+      RescaleOp rescale = new RescaleOp((float) factor, 0f,
+         new RenderingHints(RenderingHints.KEY_COLOR_RENDERING, RenderingHints.VALUE_COLOR_RENDER_QUALITY));
+      rescale.filter(awt(), awt());
+   }
+
+   public void contrastInPlace(double factor) {
+      int[] argb = awt().getRGB(0, 0, width, height, null, 0, width);
+      for (int i = 0; i < argb.length; i++) {
+         int p = argb[i];
+         int r = PixelTools.truncate((factor * (PixelTools.red(p) - 128)) + 128);
+         int g = PixelTools.truncate((factor * (PixelTools.green(p) - 128)) + 128);
+         int b = PixelTools.truncate((factor * (PixelTools.blue(p) - 128)) + 128);
+         argb[i] = PixelTools.argb(PixelTools.alpha(p), r, g, b);
+      }
+      awt().setRGB(0, 0, width, height, argb, 0, width);
+   }
+}

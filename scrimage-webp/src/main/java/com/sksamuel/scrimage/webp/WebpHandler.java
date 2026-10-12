@@ -1,0 +1,144 @@
+package com.sksamuel.scrimage.webp;
+
+import java.io.IOException;
+import java.io.InputStream;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.nio.file.Paths;
+import java.nio.file.StandardCopyOption;
+import java.nio.file.attribute.PosixFilePermission;
+import java.util.Arrays;
+import java.util.HashSet;
+import java.util.Set;
+
+import org.apache.commons.lang3.SystemUtils;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
+abstract class WebpHandler {
+
+   private static final Logger logger = LoggerFactory.getLogger(WebpHandler.class);
+
+   protected static Path getPathFromProperty(String name) {
+      try {
+         String binaryDir = System.getProperty("com.sksamuel.scrimage.webp.binary.dir");
+         if (binaryDir != null && !binaryDir.isEmpty()) {
+            Path path = Paths.get(binaryDir, name);
+            if (Files.isExecutable(path)) {
+               return path;
+            }
+         }
+         return null;
+      } catch (Exception ignored) {
+         return null;
+      }
+   }
+
+   protected static Path createPlaceholder(String name) throws IOException {
+      return Files.createTempFile(name, "binary");
+   }
+
+   protected static void installBinary(Path output, String... sources) throws IOException {
+      logger.info("Installing binary at {}", output);
+      for (String source : sources) {
+         logger.debug("Trying source from {}", source);
+         // Use try-with-resources so the InputStream is closed even if
+         // Files.copy throws — the previous code closed `in` after the
+         // copy on the success path only, leaking the stream on any IO
+         // error mid-copy.
+         try (InputStream in = WebpHandler.class.getResourceAsStream(source)) {
+            if (in != null) {
+               logger.debug("Source detected {}", source);
+               Files.copy(in, output, StandardCopyOption.REPLACE_EXISTING);
+
+               if (!SystemUtils.IS_OS_WINDOWS) {
+                  logger.info("Setting executable {}", output);
+                  setExecutable(output);
+               }
+               return;
+            }
+         }
+      }
+      throw new IOException("Could not locate webp binary at " + Arrays.toString(sources));
+   }
+
+   /**
+    * Returns the search paths to locate the webp binaries for the given binary.
+    */
+   protected static String[] getBinaryPaths(String binaryName) {
+
+      String osArch = System.getProperty("os.arch");
+      if (osArch == null) osArch = "";
+
+      if (SystemUtils.IS_OS_WINDOWS) {
+         return windows(binaryName);
+      } else if ("mac_arm64".equals(System.getProperty("com.sksamuel.scrimage.webp.platform"))) {
+         return macArm(binaryName);
+      } else if (SystemUtils.IS_OS_MAC && (osArch.startsWith("arm") || osArch.startsWith("aarch64"))) {
+         return macArm(binaryName);
+      } else if (SystemUtils.IS_OS_MAC) {
+         return macIntel(binaryName);
+      } else if (SystemUtils.IS_OS_LINUX && (osArch.startsWith("arm") || osArch.startsWith("aarch64"))) {
+         return linuxArm(binaryName);
+      } else {
+         return linux(binaryName);
+      }
+   }
+
+   private static String[] macIntel(String binaryName) {
+      return new String[]{
+         "/webp_binaries/" + binaryName,
+         "/webp_binaries/mac/" + binaryName,
+         "/dist_webp_binaries/libwebp-1.4.0-mac-x86-64/bin/" + binaryName,
+      };
+   }
+
+   private static String[] macArm(String binaryName) {
+      return new String[]{
+         "/webp_binaries/" + binaryName,
+         "/webp_binaries/mac_arm64/" + binaryName,
+         "/dist_webp_binaries/libwebp-1.4.0-mac-arm64/bin/" + binaryName,
+      };
+   }
+
+   private static String[] windows(String binaryName) {
+      return new String[]{
+         "/webp_binaries/" + binaryName,
+         "/webp_binaries/" + binaryName + ".exe",
+         // typo from previous versions must be left in
+         "/webp_binaries/window/" + binaryName,
+         "/webp_binaries/window/" + binaryName + ".exe",
+         "/webp_binaries/windows/" + binaryName,
+         "/webp_binaries/windows/" + binaryName + ".exe",
+         "/dist_webp_binaries/libwebp-1.4.0-windows-x64/bin/" + binaryName,
+         "/dist_webp_binaries/libwebp-1.4.0-windows-x64/bin/" + binaryName + ".exe",
+      };
+   }
+
+   private static String[] linux(String binaryName) {
+      return new String[]{
+         "/webp_binaries/" + binaryName,
+         "/webp_binaries/linux/" + binaryName,
+         "/dist_webp_binaries/libwebp-1.4.0-linux-x86-64/bin/" + binaryName,
+      };
+   }
+
+   private static String[] linuxArm(String binaryName) {
+      return new String[]{
+         "/webp_binaries/" + binaryName,
+         "/webp_binaries/linux/" + binaryName,
+         "/dist_webp_binaries/libwebp-1.4.0-linux-aarch64/bin/" + binaryName,
+      };
+   }
+
+   private static void setExecutable(Path output) throws IOException {
+      Set<PosixFilePermission> permissions = Files.getPosixFilePermissions(output);
+      Set<PosixFilePermission> newPermissions = new HashSet<>(permissions);
+      newPermissions.add(PosixFilePermission.OWNER_EXECUTE);
+      newPermissions.add(PosixFilePermission.GROUP_EXECUTE);
+      newPermissions.add(PosixFilePermission.OTHERS_EXECUTE);
+      if (!permissions.equals(newPermissions)) {
+         Files.setPosixFilePermissions(output, newPermissions);
+      }
+   }
+}

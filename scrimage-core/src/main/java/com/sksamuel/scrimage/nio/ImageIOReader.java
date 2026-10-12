@@ -1,0 +1,130 @@
+package com.sksamuel.scrimage.nio;
+
+import com.sksamuel.scrimage.ImmutableImage;
+
+import javax.imageio.ImageIO;
+import javax.imageio.ImageReadParam;
+import javax.imageio.stream.ImageInputStream;
+import java.awt.*;
+import java.awt.image.BufferedImage;
+import java.io.ByteArrayInputStream;
+import java.io.IOException;
+import java.util.ArrayList;
+import java.util.Collections;
+import java.util.Iterator;
+import java.util.List;
+
+public class ImageIOReader implements ImageReader {
+
+   private final List<javax.imageio.ImageReader> readers;
+
+   public ImageIOReader() {
+      readers = Collections.emptyList();
+   }
+
+   public ImageIOReader(List<javax.imageio.ImageReader> readers) {
+      this.readers = readers;
+   }
+
+   private ImmutableImage tryLoad(javax.imageio.ImageReader reader,
+                                  ImageInputStream iis,
+                                  Rectangle rectangle,
+                                  boolean ownsReader) throws IOException {
+      try {
+         // Rewind the stream to the start before each reader attempt. The same
+         // ImageInputStream is reused across multiple readers in read(...)'s
+         // fallback loop; a previous reader may have consumed/advanced the
+         // stream (or partially read before throwing), leaving the position
+         // past the start. Without seeking back, subsequent fallback readers
+         // would read from a consumed/garbage position and fail spuriously.
+         // The MemoryCacheImageInputStream created over a ByteArrayInputStream
+         // is seekable, and seek(0) is a no-op for the common single-reader
+         // success case.
+         iis.seek(0);
+         reader.setInput(iis);
+
+         // Skip a redundant header pass: setDestinationType(imageTypes.next())
+         // is equivalent to leaving destinationType=null (per ImageReadParam
+         // docs, null means "use the first compatible type" — exactly what
+         // imageTypes.next() returns). The previous code triggered an
+         // additional reader.getImageTypes(0) call which forces the reader
+         // to parse the source header just to enumerate types it would
+         // otherwise pick on demand.
+         BufferedImage bufferedImage;
+         if (rectangle == null) {
+            bufferedImage = reader.read(0);
+         } else {
+            ImageReadParam params = reader.getDefaultReadParam();
+            params.setSourceRegion(rectangle);
+            bufferedImage = reader.read(0, params);
+         }
+         return ImmutableImage.wrapAwt(bufferedImage);
+      } finally {
+         // javax.imageio.ImageReader is a thin Java wrapper around a native decoder. When you read a JPEG,
+         // the JDK loads libjavajpeg.so and allocates native structs (Huffman tables, coefficient buffers, SOF data)
+         // using malloc. When you read a WebP, the luciad
+         // webp-imageio plugin calls WebPEncoderOptions_createConfig which does a calloc in native code.
+         // These allocations live outside the Java heap — the GC has no visibility into them.
+         //
+         //  The contract for javax.imageio.ImageReader is that you must call reader.dispose() when done.
+         //  That method triggers the JNI dispose call which runs the corresponding free() on those native structs.
+         //  Without it, the memory is permanently leaked for the lifetime of the JVM process.
+         //
+         //  However, we must only dispose readers that we created ourselves (via ImageIO.getImageReaders,
+         //  which mints fresh instances on every call). Caller-supplied readers are reused across read()
+         //  calls, and a disposed reader throws IllegalStateException("Attempting to use reader after
+         //  dispose()") on any subsequent use — making the loader single-use. For those we reset() instead,
+         //  which returns the reader to its initial state (releasing the input stream reference) while
+         //  keeping it usable; releasing its native resources is the caller's responsibility.
+         if (ownsReader) {
+            reader.dispose();
+         } else {
+            reader.reset();
+         }
+      }
+   }
+
+   @Override
+   public ImmutableImage read(byte[] bytes, Rectangle rectangle) throws IOException {
+
+      if (bytes == null)
+         throw new IOException("bytes cannot be null");
+
+      ImageInputStream iis = ImageIO.createImageInputStream(new ByteArrayInputStream(bytes));
+      if (iis == null)
+         throw new IOException("No ImageInputStream supported this image format");
+
+      try {
+         // Readers minted by ImageIO.getImageReaders are fresh instances owned by us and must be
+         // disposed after use. Caller-supplied readers are owned by the caller and are reused on
+         // every read() call, so they must not be disposed here.
+         boolean ownsReaders = readers.isEmpty();
+         Iterator<javax.imageio.ImageReader> iter;
+         if (ownsReaders)
+            iter = ImageIO.getImageReaders(iis);
+         else
+            iter = readers.iterator();
+
+         List<String> attempts = new ArrayList<>();
+         while (iter.hasNext()) {
+            try {
+               return tryLoad(iter.next(), iis, rectangle, ownsReaders);
+            } catch (Exception e) {
+               attempts.add(e.getMessage());
+            }
+         }
+
+         if (attempts.isEmpty())
+            throw new IOException("No javax.imageio.ImageReader supported this image format");
+         else
+            throw new IOException("No javax.imageio.ImageReader supported this image format; tried " + attempts.size() + " readers; errors=" + attempts);
+      } finally {
+         iis.close();
+      }
+   }
+
+   @Override
+   public String toString() {
+      return "com.sksamuel.scrimage.nio.ImageIOReader (delegates to the JDK javax.imageio readers)";
+   }
+}

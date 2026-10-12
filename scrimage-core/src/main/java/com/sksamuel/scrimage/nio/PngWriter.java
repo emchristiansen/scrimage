@@ -1,0 +1,102 @@
+/*
+   Copyright 2013 Stephen K Samuel
+
+   Licensed under the Apache License, Version 2.0 (the "License");
+   you may not use this file except in compliance with the License.
+   You may obtain a copy of the License at
+
+       http://www.apache.org/licenses/LICENSE-2.0
+
+   Unless required by applicable law or agreed to in writing, software
+   distributed under the License is distributed on an "AS IS" BASIS,
+   WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+   See the License for the specific language governing permissions and
+   limitations under the License.
+ */
+
+package com.sksamuel.scrimage.nio;
+
+import com.sksamuel.scrimage.AwtImage;
+import com.sksamuel.scrimage.metadata.ImageMetadata;
+
+import javax.imageio.IIOImage;
+import javax.imageio.ImageIO;
+import javax.imageio.ImageTypeSpecifier;
+import javax.imageio.ImageWriteParam;
+import javax.imageio.stream.ImageOutputStream;
+import java.io.IOException;
+import java.io.OutputStream;
+
+public class PngWriter implements ImageWriter {
+
+   public static final PngWriter MaxCompression = new PngWriter(9);
+   public static final PngWriter MinCompression = new PngWriter(1);
+   public static final PngWriter NoCompression = new PngWriter(0);
+
+   private final int compressionLevel;
+
+   public PngWriter() {
+      this.compressionLevel = 9;
+   }
+
+   public PngWriter(int compressionLevel) {
+      // Validate up front rather than at write time. The earlier
+      // code deferred the check to write(), which only fires after
+      // the caller has opened the OutputStream — so a bad compression
+      // level both produced a confusing failure mode and (when the
+      // caller passed a FileOutputStream that wasn't closed on the
+      // throw) leaked file descriptors.
+      if (compressionLevel < 0 || compressionLevel > 9) {
+         throw new IllegalArgumentException(
+            "Compression level must be between 0 (none) and 9 (max), got " + compressionLevel);
+      }
+      this.compressionLevel = compressionLevel;
+   }
+
+   public PngWriter withMaxCompression() {
+      return MaxCompression;
+   }
+
+   public PngWriter withMinCompression() {
+      return MinCompression;
+   }
+
+   public PngWriter withCompression(int compression) {
+      return new PngWriter(compression);
+   }
+
+   @Override
+   public void write(AwtImage image, ImageMetadata metadata, OutputStream out) throws IOException {
+
+      // createFromRenderedImage rather than createFromBufferedImageType: the latter throws
+      // IllegalArgumentException for TYPE_CUSTOM (type 0), which is what the JDK PNG reader
+      // returns for 16-bit per channel PNGs — so such images could never be written back out.
+      ImageTypeSpecifier type = ImageTypeSpecifier.createFromRenderedImage(image.awt());
+      javax.imageio.ImageWriter writer = ImageIO.getImageWriters(type, "png").next();
+      try (ImageOutputStream ios = ImageIO.createImageOutputStream(out)) {
+         ImageWriteParam param = writer.getDefaultWriteParam();
+
+         if (param.canWriteCompressed()) {
+            switch (compressionLevel) {
+               case 0: // none
+                  param.setCompressionMode(ImageWriteParam.MODE_DISABLED);
+                  break;
+               default:
+                  param.setCompressionMode(ImageWriteParam.MODE_EXPLICIT);
+                  // The JDK PNG writer maps quality back to a deflate level as
+                  // 9 - round(9 * quality), so dividing by 9 makes our level N a
+                  // deflate level N. The previous /8 mapping sent level 1 to
+                  // quality 1.0 = deflate level 0 (stored), so MinCompression
+                  // wrote fully uncompressed files, identical to NoCompression.
+                  param.setCompressionQuality((9 - compressionLevel) / 9.0f);
+                  break;
+            }
+         }
+
+         writer.setOutput(ios);
+         writer.write(null, new IIOImage(image.awt(), null, null), param);
+      } finally {
+         writer.dispose();
+      }
+   }
+}
