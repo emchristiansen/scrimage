@@ -1,0 +1,70 @@
+package com.sksamuel.scrimage.nio;
+
+import com.sksamuel.scrimage.ImageParseException;
+import com.sksamuel.scrimage.ImmutableImage;
+import com.sksamuel.scrimage.UnsupportedFormatException;
+import com.sksamuel.scrimage.format.Format;
+import com.sksamuel.scrimage.format.FormatDetector;
+
+import java.awt.*;
+import java.io.IOException;
+import java.util.ArrayList;
+import java.util.List;
+import java.util.Optional;
+import java.util.ServiceLoader;
+import java.util.stream.Collectors;
+import java.util.stream.StreamSupport;
+
+/**
+ * Utilities for reading of an Image to an array of bytes in a specified format.
+ */
+public class ImageReaders {
+
+   private static final List<ImageReader> defaultReaders = detectReaders();
+
+   private static List<ImageReader> detectReaders() {
+      return detectReaders(Thread.currentThread().getContextClassLoader());
+   }
+
+   private static List<ImageReader> detectReaders(ClassLoader classloader) {
+      return StreamSupport.stream(ServiceLoader.load(ImageReader.class, classloader).spliterator(), false).collect(Collectors.toList());
+   }
+
+   public static ImmutableImage read(ImageSource source, Rectangle rectangle) throws IOException {
+      return read(source, rectangle, defaultReaders);
+   }
+
+   public static ImmutableImage read(ImageSource source, Rectangle rectangle, ClassLoader classloader) throws IOException {
+      return read(source, rectangle, classloader == null ? defaultReaders : detectReaders(classloader));
+   }
+
+   /**
+    * Attempts to read an image from the given source, using the supplied image readers.
+    *
+    * @param source    the image source
+    * @param rectangle an optional subset of the image to read.
+    * @param readers   the readers that should be used to attempt to load this image.
+    * @return the image read from the given source
+    */
+   public static ImmutableImage read(ImageSource source, Rectangle rectangle, List<ImageReader> readers) throws IOException {
+      List<Throwable> errors = new ArrayList<>();
+      byte[] bytes = source.read();
+      for (ImageReader reader : readers) {
+         try {
+            ImmutableImage image = reader.read(bytes, rectangle);
+            if (image == null) {
+               errors.add(new IOException(reader + " failed"));
+            } else {
+               return image;
+            }
+         } catch (Exception e) {
+            errors.add(new IOException(reader.toString() + " failed due to " + e.getMessage(), e));
+         }
+      }
+      Format format = FormatDetector.detect(bytes).orElse(null);
+      if (format == null)
+         throw new UnsupportedFormatException(errors);
+      else
+         throw new ImageParseException(errors, format);
+   }
+}

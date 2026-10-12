@@ -1,0 +1,55 @@
+/*
+   Copyright 2013 Stephen K Samuel
+
+   Licensed under the Apache License, Version 2.0 (the "License");
+   you may not use this file except in compliance with the License.
+   You may obtain a copy of the License at
+
+       http://www.apache.org/licenses/LICENSE-2.0
+
+   Unless required by applicable law or agreed to in writing, software
+   distributed under the License is distributed on an "AS IS" BASIS,
+   WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+   See the License for the specific language governing permissions and
+   limitations under the License.
+ */
+package com.sksamuel.scrimage.filter;
+
+import java.awt.image.BufferedImageOp;
+
+public class LensBlurFilter extends BufferedOpFilter {
+
+    private final float radius;
+    private final float bloom;
+    private final float bloomThreshold;
+    private final int sides;
+
+    public  LensBlurFilter(float radius, float bloom, float bloomThreshold, int sides) {
+        if (radius < 0)
+            throw new IllegalArgumentException("radius must be >= 0, got " + radius);
+        // The jhlabs implementation computes `polyAngle = π / sides` and
+        // walks the polygon vertices; sides < 3 either divides by zero
+        // (sides == 0) or produces a degenerate "polygon" of 1–2 vertices
+        // that the bokeh-shape math doesn't handle.
+        if (sides < 3)
+            throw new IllegalArgumentException("sides must be >= 3, got " + sides);
+        this.radius = radius;
+        this.bloom = bloom;
+        this.bloomThreshold = bloomThreshold;
+        this.sides = sides;
+    }
+
+    public LensBlurFilter() {
+        this(5, 2, 255, 5);
+    }
+
+    @Override
+    public BufferedImageOp op() {
+        thirdparty.jhlabs.image.LensBlurFilter op = new thirdparty.jhlabs.image.LensBlurFilter();
+        op.setSides(sides);
+        op.setBloomThreshold(bloomThreshold);
+        op.setBloom(bloom);
+        op.setRadius(radius);
+        return op;
+    }
+}

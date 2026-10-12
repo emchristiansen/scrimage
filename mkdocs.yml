@@ -1,0 +1,86 @@
+site_name: Scrimage Image Library
+
+# Meta tags (placed in header)
+site_description: Java, Scala, Kotlin image manipulation library.
+site_author: sksamuel
+site_url: https://github.com/sksamuel/scrimage
+
+markdown_extensions:
+   - admonition
+   - pymdownx.arithmatex
+   - pymdownx.details
+   - pymdownx.tabbed
+   - codehilite
+   - pymdownx.superfences
+   - admonition
+   - attr_list
+   -  pymdownx.highlight:
+         use_pygments: true
+
+# Repository (add link to repository on each page)
+repo_name: scrimage
+repo_url: https://github.com/sksamuel/scrimage
+
+theme:
+   icon:
+      logo: material/camera
+      repo: fontawesome/brands/github
+   name: material
+   palette:
+      primary: black
+      accent: orange
+   features:
+      - search.highlight
+
+plugins:
+   - search
+
+nav:
+   -  Overview:
+         -  "Welcome": "index.md"
+         - "quick_start.md"
+         - "changelog.md"
+         - "faq.md"
+   -  Api:
+         -  "Introduction": "api_intro.md"
+         -  "Creating an image": "create.md"
+         -  "Pixel Functions": "pixels.md"
+         -  "Colors": "colors.md"
+         -  "Histogram": "histogram.md"
+         -  "Comparing Images": "compare.md"
+         -  "Metadata": "metadata.md"
+   -  IO:
+         -  "Reading/Writing": "io.md"
+         -  "Webp": "webp.md"
+         -  "Extra Formats": "extra_formats.md"
+         -  "Format Detection": "format_detection.md"
+         -  "Animated Gif": "animated_gif.md"
+         -  "Animated WebP": "animated_webp.md"
+   -  Operations:
+         - "autocrop.md"
+         - "brightness.md"
+         - "blur-and-stretch.md"
+         - "bound.md"
+         - "contrast.md"
+         - "cover.md"
+         - "fill.md"
+         - "fit.md"
+         - "flip.md"
+         - "gamma.md"
+         - "grayscale.md"
+         - "invert.md"
+         - "max.md"
+         - "pad.md"
+         - "overlay.md"
+         - "resize.md"
+         - "rotate.md"
+         - "scale.md"
+         - "square.md"
+         - "drop.md"
+         - "take.md"
+         - "translate.md"
+         - "trim.md"
+         - "zoom.md"
+   - "filters.md"
+   - "composites.md"
+   - "transforms.md"

@@ -1,0 +1,34 @@
+plugins {
+   id("java-conventions")
+   id("testing-conventions")
+   id("me.champeau.jmh") version "0.7.3"
+}
+
+dependencies {
+   jmh project(":scrimage-core")
+   jmh "org.imgscalr:imgscalr-lib:4.2"
+   jmh 'net.coobird:thumbnailator:0.4.21'
+}
+
+jmh {
+   warmupIterations = 1
+   iterations = 3
+   fork = 1
+   batchSize = 5
+   operationsPerInvocation = 5
+   warmup = '1s'
+   warmupBatchSize = 5
+   profilers = ['gc']
+   zip64 = true
+   duplicateClassesStrategy = DuplicatesStrategy.EXCLUDE
+   resultFormat = 'JSON'
+   resultsFile = layout.buildDirectory.file('results/jmh/results.json')
+   def jmhIncludes = project.findProperty('jmh.includes')
+   if (jmhIncludes) {
+      includes = [jmhIncludes.toString()]
+   }
+}
+
+processJmhResources {
+   duplicatesStrategy = DuplicatesStrategy.EXCLUDE
+}

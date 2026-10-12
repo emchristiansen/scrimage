@@ -1,0 +1,157 @@
+package com.sksamuel.scrimage.nio;
+
+import ar.com.hjg.pngj.ImageLineHelper;
+import ar.com.hjg.pngj.ImageLineInt;
+import com.sksamuel.scrimage.ImmutableImage;
+import com.sksamuel.scrimage.metadata.ImageMetadata;
+import com.sksamuel.scrimage.pixels.PixelTools;
+
+import java.awt.Rectangle;
+import java.awt.image.BufferedImage;
+import java.awt.image.ColorModel;
+import java.awt.image.DataBufferInt;
+import java.awt.image.Raster;
+import java.awt.image.WritableRaster;
+import java.io.ByteArrayInputStream;
+
+public class PngReader implements ImageReader {
+
+   @Override
+   public ImmutableImage read(byte[] bytes, Rectangle rectangle) {
+
+      if (!isPng(bytes))
+         return null;
+
+      ar.com.hjg.pngj.PngReader pngr = new ar.com.hjg.pngj.PngReader(new ByteArrayInputStream(bytes));
+      // close() in a finally: any exception during the read loop (truncated or
+      // malformed PNG, palette index out of range, OOM on a huge declared size)
+      // would otherwise skip end()/close() and leak the reader and its zlib
+      // Inflater. ImageReaders swallows the exception and tries the next reader,
+      // so repeated corrupt-PNG loads would accumulate undeflated Inflaters.
+      try {
+
+      int channels = pngr.imgInfo.channels;
+      int bitDepth = pngr.imgInfo.bitDepth;
+      int w = pngr.imgInfo.cols;
+      int h = pngr.imgInfo.rows;
+
+      // Guard against int overflow: w * h is computed in int arithmetic below, so a PNG
+      // declaring very large dimensions can wrap to a negative size (NegativeArraySizeException)
+      // or a small/wrong positive size, producing an undersized buffer that later trips
+      // ArrayIndexOutOfBoundsException in the row loops. Validate up front with long math.
+      long pixelCount = (long) w * h;
+      if (pixelCount > Integer.MAX_VALUE)
+         throw new IllegalArgumentException("PNG too large: " + w + "x" + h);
+
+      int[] matrix = new int[(int) pixelCount];
+
+      if (pngr.imgInfo.indexed) {
+         ar.com.hjg.pngj.chunks.PngChunkPLTE plte = pngr.getMetadata().getPLTE();
+         // The tRNS chunk carries per-palette-entry alpha for indexed PNGs.
+         // When present, palette2rgb unpacks 4 channels (RGBA) so the entry's
+         // alpha is honoured; previously it was passed null and every pixel was
+         // forced to alpha 255, silently dropping palette transparency.
+         ar.com.hjg.pngj.chunks.PngChunkTRNS trns = pngr.getMetadata().getTRNS();
+         int[] pixels = null;
+         for (int row = 0; row < h; row++) {
+            ImageLineInt scanline = (ImageLineInt) pngr.readRow();
+            if (bitDepth < 8)
+               ImageLineHelper.scaleUp(scanline);
+            int rowOffset = row * w;
+            if (trns == null) {
+               pixels = ImageLineHelper.palette2rgb(scanline, plte, pixels); // 3 channels (RGB)
+               for (int x = 0, k = 0; x < w; x++, k += 3) {
+                  matrix[rowOffset + x] = PixelTools.argb(255, pixels[k], pixels[k + 1], pixels[k + 2]);
+               }
+            } else {
+               pixels = ImageLineHelper.palette2rgb(scanline, plte, trns, pixels); // 4 channels (RGBA)
+               for (int x = 0, k = 0; x < w; x++, k += 4) {
+                  matrix[rowOffset + x] = PixelTools.argb(pixels[k + 3], pixels[k], pixels[k + 1], pixels[k + 2]);
+               }
+            }
+         }
+      } else {
+         for (int row = 0; row < h; row++) {
+            ImageLineInt line = (ImageLineInt) pngr.readRow();
+            // pngj returns raw sample values, but PixelTools.argb expects 0-255 per channel:
+            // - bit depths 1/2/4 (grayscale only) arrive unscaled (a 1-bit white pixel is 1,
+            //   not 255) and must be scaled up. Note scaleUp is an explicit no-op for indexed
+            //   lines, so it only has effect here in the non-indexed branch.
+            // - bit depth 16 arrives as 0-65535, so keep the high byte of each sample;
+            //   previously the low byte was kept (via the & 0xFF in PixelTools.argb),
+            //   decoding e.g. a uniform 0x8000 mid-grey as black.
+            if (bitDepth < 8) {
+               ImageLineHelper.scaleUp(line);
+            }
+            int[] scanline = line.getScanline();
+            if (bitDepth == 16) {
+               for (int i = 0; i < scanline.length; i++) {
+                  scanline[i] >>= 8;
+               }
+            }
+            int rowOffset = row * w;
+            switch (channels) {
+               case 1:
+                  for (int x = 0, k = 0; x < w; x++, k += channels) {
+                     int v = scanline[k];
+                     matrix[rowOffset + x] = PixelTools.argb(255, v, v, v); // greyscale no alpha
+                  }
+                  break;
+               case 2:
+                  for (int x = 0, k = 0; x < w; x++, k += channels) {
+                     int v = scanline[k];
+                     matrix[rowOffset + x] = PixelTools.argb(scanline[k + 1], v, v, v);
+                  }
+                  break;
+               case 3:
+                  for (int x = 0, k = 0; x < w; x++, k += channels) {
+                     matrix[rowOffset + x] = PixelTools.argb(255, scanline[k], scanline[k + 1], scanline[k + 2]); // if no alpha then 255 is full opacity
+                  }
+                  break;
+               case 4:
+                  for (int x = 0, k = 0; x < w; x++, k += channels) {
+                     matrix[rowOffset + x] = PixelTools.argb(scanline[k + 3], scanline[k], scanline[k + 1], scanline[k + 2]); // note: the png reader is in RGBA
+                  }
+                  break;
+            }
+         }
+      }
+      pngr.end();
+
+      DataBufferInt buffer = new DataBufferInt(matrix, matrix.length);
+      int[] bandMasks = new int[]{0xFF0000, 0xFF00, 0xFF, 0xFF000000};
+      WritableRaster raster = Raster.createPackedRaster(buffer, w, h, w, bandMasks, null);
+
+      ColorModel cm = ColorModel.getRGBdefault();
+      BufferedImage bi = new BufferedImage(cm, raster, cm.isAlphaPremultiplied(), null);
+
+      ImmutableImage image = ImmutableImage.wrapAwt(bi, ImageMetadata.empty);
+      if (rectangle != null) {
+         image = image.subimage(rectangle);
+      }
+      return image;
+
+      } finally {
+         pngr.close();
+      }
+   }
+
+   // PNG magic bytes: 0x89 'P' 'N' 'G' 0x0D 0x0A 0x1A 0x0A, compared in place
+   // to avoid allocating two 8-byte arrays per call.
+   private boolean isPng(byte[] bytes) {
+      return bytes.length >= 8 &&
+         bytes[0] == (byte) 0x89 &&
+         bytes[1] == 'P' &&
+         bytes[2] == 'N' &&
+         bytes[3] == 'G' &&
+         bytes[4] == 0x0D &&
+         bytes[5] == 0x0A &&
+         bytes[6] == 0x1A &&
+         bytes[7] == 0x0A;
+   }
+
+   @Override
+   public String toString() {
+      return "com.sksamuel.scrimage.nio.PngReader (delegates to ar.com.hjg.pngj)";
+   }
+}

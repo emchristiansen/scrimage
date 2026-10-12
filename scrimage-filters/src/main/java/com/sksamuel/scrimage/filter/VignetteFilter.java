@@ -1,0 +1,106 @@
+/*
+   Copyright 2013 Stephen K Samuel
+
+   Licensed under the Apache License, Version 2.0 (the "License");
+   you may not use this file except in compliance with the License.
+   You may obtain a copy of the License at
+
+       http://www.apache.org/licenses/LICENSE-2.0
+
+   Unless required by applicable law or agreed to in writing, software
+   distributed under the License is distributed on an "AS IS" BASIS,
+   WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+   See the License for the specific language governing permissions and
+   limitations under the License.
+ */
+package com.sksamuel.scrimage.filter;
+
+import com.sksamuel.scrimage.ImmutableImage;
+import thirdparty.romainguy.BlendComposite;
+import thirdparty.romainguy.BlendingMode;
+
+import java.awt.*;
+import java.awt.geom.Point2D;
+import java.io.IOException;
+
+public class VignetteFilter implements Filter {
+
+    private final float start;
+    private final float end;
+    private final float blur;
+    private final Color color;
+
+    public VignetteFilter(float start, float end, float blur, Color color) {
+        // Asserts are disabled by default in production JVMs, so the
+        // previous assert-based range checks were no-ops. Out-of-range
+        // start surfaced as a cryptic IllegalArgumentException out of
+        // RadialGradientPaint about gradient fractions; out-of-range
+        // blur was passed to GaussianBlurFilter as a negative radius.
+        // Validate explicitly with a useful diagnostic.
+        if (!(start >= 0 && start <= 1)) {
+            throw new IllegalArgumentException("start must be in [0, 1]; got " + start);
+        }
+        if (!(blur >= 0 && blur <= 1)) {
+            throw new IllegalArgumentException("blur must be in [0, 1]; got " + blur);
+        }
+        // end scales the radius of the RadialGradientPaint (image.radius() * end),
+        // which requires a radius strictly greater than zero. Without this check,
+        // end <= 0 surfaced at apply time as a cryptic "Radius must be greater
+        // than zero" from RadialGradientPaint.
+        if (!(end > 0 && end <= 1)) {
+            throw new IllegalArgumentException("end must be in (0, 1]; got " + end);
+        }
+        this.start = start;
+        this.end = end;
+        this.blur = blur;
+        this.color = color;
+    }
+
+    public VignetteFilter() {
+        this(0.85f, 0.95f, 0.3f, Color.BLACK);
+    }
+
+    private ImmutableImage background(ImmutableImage image) {
+
+        ImmutableImage target = image.blank();
+        Graphics2D g2 = (Graphics2D) target.awt().getGraphics();
+        try {
+            float radius = image.radius() * end;
+
+            final float fraction;
+            if (start == 0) fraction = 0.01f;
+            else if (start == 1) fraction = 0.999f;
+            else fraction = start;
+
+            RadialGradientPaint p = new RadialGradientPaint(
+                    new Point2D.Float(target.centreX(), target.centreY()),
+                    radius,
+                    new float[]{0.0f, fraction, 1f},
+                    new Color[]{Color.WHITE, Color.WHITE, color});
+
+            g2.setPaint(p);
+            g2.setRenderingHint(RenderingHints.KEY_ANTIALIASING, RenderingHints.VALUE_ANTIALIAS_ON);
+            g2.setRenderingHint(RenderingHints.KEY_DITHERING, RenderingHints.VALUE_DITHER_ENABLE);
+            g2.setRenderingHint(RenderingHints.KEY_INTERPOLATION, RenderingHints.VALUE_INTERPOLATION_BICUBIC);
+            g2.setRenderingHint(RenderingHints.KEY_COLOR_RENDERING, RenderingHints.VALUE_COLOR_RENDER_QUALITY);
+            g2.fillRect(0, 0, target.width, target.height);
+        } finally {
+            g2.dispose();
+        }
+
+        return target;
+    }
+
+
+    @Override
+    public void apply(ImmutableImage image) throws IOException {
+        ImmutableImage bg = background(image).filter(new GaussianBlurFilter((int) (image.radius() * blur)));
+        Graphics2D g2 = (Graphics2D) image.awt().getGraphics();
+        try {
+            g2.setComposite(new BlendComposite(BlendingMode.MULTIPLY, 1.0f));
+            g2.drawImage(bg.awt(), 0, 0, null);
+        } finally {
+            g2.dispose();
+        }
+    }
+}

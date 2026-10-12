@@ -1,0 +1,81 @@
+package com.sksamuel.scrimage.color;
+
+import com.sksamuel.scrimage.pixels.PixelTools;
+
+/**
+ * Hue/Saturation/Value
+ * <p>
+ * The hue component should be between 0.0 and 360.0
+ * The saturation component should be between 0.0 and 1.0
+ * The value component should be between 0.0 and 1.0
+ * The alpha component should be between 0.0 and 1.0
+ */
+public class HSVColor implements Color {
+
+   public final float hue;
+   public final float saturation;
+   public final float value;
+   public final float alpha;
+
+   public HSVColor(float hue, float saturation, float value, float alpha) {
+      // Validate explicitly rather than with `assert`, which is disabled by
+      // default in production JVMs (so out-of-range values would slip through
+      // and produce wrong colours in toRGB()).
+      requireInRange("hue", hue, 360f);
+      requireInRange("saturation", saturation, 1f);
+      requireInRange("value", value, 1f);
+      requireInRange("alpha", alpha, 1f);
+
+      this.hue = hue;
+      this.saturation = saturation;
+      this.value = value;
+      this.alpha = alpha;
+   }
+
+   private static void requireInRange(String component, float value, float max) {
+      // negated form so that NaN, for which all comparisons are false, is also rejected
+      if (!(value >= 0 && value <= max))
+         throw new IllegalArgumentException(
+            "HSVColor " + component + " component must be in [0, " + max + "] but was " + value);
+   }
+
+   public HSVColor toHSV() {
+      return this;
+   }
+
+   public RGBColor toRGB() {
+      int rgb = java.awt.Color.HSBtoRGB(hue / 360f, saturation, value);
+      return new RGBColor(PixelTools.red(rgb), PixelTools.green(rgb), PixelTools.blue(rgb), Math.round(alpha * 255));
+   }
+
+   @Override
+   public boolean equals(Object o) {
+      if (this == o) return true;
+      if (o == null || getClass() != o.getClass()) return false;
+      HSVColor hsvColor = (HSVColor) o;
+      return Float.compare(hsvColor.hue, hue) == 0 &&
+         Float.compare(hsvColor.saturation, saturation) == 0 &&
+         Float.compare(hsvColor.value, value) == 0 &&
+         Float.compare(hsvColor.alpha, alpha) == 0;
+   }
+
+   @Override
+   public int hashCode() {
+      int result = Float.floatToIntBits(hue);
+      result = 31 * result + Float.floatToIntBits(saturation);
+      result = 31 * result + Float.floatToIntBits(value);
+      result = 31 * result + Float.floatToIntBits(alpha);
+      return result;
+   }
+
+   @Override
+   public String toString() {
+      final StringBuffer sb = new StringBuffer("HSVColor{");
+      sb.append("hue=").append(hue);
+      sb.append(", saturation=").append(saturation);
+      sb.append(", value=").append(value);
+      sb.append(", alpha=").append(alpha);
+      sb.append('}');
+      return sb.toString();
+   }
+}

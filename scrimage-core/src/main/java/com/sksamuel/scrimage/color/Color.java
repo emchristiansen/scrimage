@@ -1,0 +1,105 @@
+package com.sksamuel.scrimage.color;
+
+import com.sksamuel.scrimage.pixels.Pixel;
+
+import java.awt.*;
+
+public interface Color {
+
+   /**
+    * Returns a conversion of this Color into an RGBColor.
+    * If this colour is already an instance of RGBColor then the same instance will be returned.
+    *
+    * @return this colour as an RGBColor
+    */
+   RGBColor toRGB();
+
+   /**
+    * Returns a conversion of this color into a CMYK color.
+    * If this colour is already a CMYK then the same instance will be returned.
+    *
+    * @return this colour as a CMYKColor
+    */
+   default CMYKColor toCMYK() {
+      return toRGB().toCMYK();
+   }
+
+   default HSVColor toHSV() {
+      return toRGB().toHSV();
+   }
+
+   default HSLColor toHSL() {
+      return toRGB().toHSL();
+   }
+
+   default Grayscale toGrayscale() {
+      return new LumaGrayscale().toGrayscale(this);
+   }
+
+   default Grayscale toGrayscale(GrayscaleMethod method) {
+      return method.toGrayscale(this);
+   }
+
+   /**
+    * Returns a HEX String of this colour. Eg for 0,255,0, this method will return 00FF00.
+    *
+    * @return the six-character uppercase hex representation of this colour
+    */
+   default String toHex() {
+      return String.format("%06X", toRGB().toARGBInt() & 0xffffff);
+   }
+
+   default java.awt.Color awt() {
+      return toAWT();
+   }
+
+   /**
+    * Returns this instance as a java.awt.Color.
+    * AWT Colors use the RGB color model.
+    *
+    * @return this colour as a java.awt.Color
+    */
+   default java.awt.Color toAWT() {
+      RGBColor rgb = toRGB();
+      return new java.awt.Color(rgb.red, rgb.green, rgb.blue, rgb.alpha);
+   }
+
+   default Pixel toPixel(int x, int y) {
+      RGBColor rgb = toRGB();
+      return new Pixel(x, y, rgb.red, rgb.green, rgb.blue, rgb.alpha);
+   }
+
+   /**
+    * Returns the result of compositing this Color over the other Color using a
+    * Porter-Duff SrcOver alpha blend — not an arithmetic mean of the channels.
+    * As a consequence, if this colour is fully opaque it completely occludes the
+    * other colour, since SrcOver of an opaque source over any destination yields
+    * the source.
+    * <p>
+    * See https://stackoverflow.com/questions/1944095/how-to-mix-two-argb-pixels
+    *
+    * @return the SrcOver blend of this colour over the other colour as an RGBColor
+    */
+   default RGBColor average(Color other) {
+      RGBColor c1 = this.toRGB();
+      RGBColor c2 = other.toRGB();
+      double a1 = c1.alpha / 255.0;
+      double a2 = c2.alpha / 255.0;
+      double aOut = a1 + a2 * (1.0 - a1);
+      if (aOut == 0.0) return new RGBColor(0, 0, 0, 0);
+      int r = (int) Math.round((c1.red * a1 + c2.red * a2 * (1.0 - a1)) / aOut);
+      int g = (int) Math.round((c1.green * a1 + c2.green * a2 * (1.0 - a1)) / aOut);
+      int b = (int) Math.round((c1.blue * a1 + c2.blue * a2 * (1.0 - a1)) / aOut);
+      int a = (int) Math.round(aOut * 255);
+      return new RGBColor(r, g, b, a);
+   }
+
+   /**
+    * Returns this colour as an AWT Paint.
+    *
+    * @return this colour as an AWT Paint
+    */
+   default Paint paint() {
+      return new java.awt.Color(toRGB().toARGBInt(), true);
+   }
+}
